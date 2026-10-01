@@ -4,6 +4,7 @@
 //! * [`ensure_personal_canvas`] — the caller's Personal canvas (created on first use).
 //! * [`ops`] / [`read`] — the spec §4 canvas ops and read format over a `yrs` document.
 //! * [`rooms_metrics`] — live room / peer counts.
+//! * [`admin`] — instance-admin operations (delete any canvas, disconnect a user).
 //!
 //! See `docs/canvas.md` and `docs/canvas-protocol.md`.
 
@@ -12,6 +13,7 @@ use axum::routing::{any, delete, get, post};
 use axum::Router;
 use copper_cloud_core::state::SharedState;
 
+pub mod admin;
 pub mod geometry;
 pub mod ops;
 pub mod read;

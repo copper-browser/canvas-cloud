@@ -600,6 +600,14 @@ impl Rooms {
         }
     }
 
+    /// Disconnects `user`'s peers from every room (account disabled or deleted).
+    pub(crate) fn kick_user_everywhere(&self, user: Uuid) {
+        let all: Vec<Arc<Room>> = lock(&self.map).values().cloned().collect();
+        for room in all {
+            room.kick(Some(user), close::REVOKED, "access revoked");
+        }
+    }
+
     pub(crate) fn metrics(&self) -> RoomsMetrics {
         let map = lock(&self.map);
         RoomsMetrics {

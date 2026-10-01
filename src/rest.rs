@@ -387,7 +387,7 @@ async fn canvas_view(state: &AppState, user_id: Uuid, id: Uuid) -> Result<Canvas
         .ok_or(ApiError::NotFound)
 }
 
-async fn member_ids(state: &AppState, canvas_id: Uuid) -> Result<Vec<Uuid>, ApiError> {
+pub(crate) async fn member_ids(state: &AppState, canvas_id: Uuid) -> Result<Vec<Uuid>, ApiError> {
     Ok(
         sqlx::query_scalar("SELECT user_id FROM canvas_members WHERE canvas_id = $1")
             .bind(canvas_id)
@@ -396,7 +396,7 @@ async fn member_ids(state: &AppState, canvas_id: Uuid) -> Result<Vec<Uuid>, ApiE
     )
 }
 
-fn publish(state: &AppState, users: &[Uuid], canvas_id: Uuid, kind: &str) {
+pub(crate) fn publish(state: &AppState, users: &[Uuid], canvas_id: Uuid, kind: &str) {
     for user in users {
         state.events.publish(
             *user,
