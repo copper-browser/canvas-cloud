@@ -157,7 +157,7 @@ async fn persistence_survives_room_eviction() {
             .fetch_all(app.db())
             .await
             .unwrap();
-    assert!(!blobs.is_empty());
+    assert_ne!(blobs.len(), 0, "updates must be persisted");
     for blob in blobs {
         assert!(
             !blob.windows(6).any(|w| w == b"note 1"),

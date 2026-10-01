@@ -453,7 +453,7 @@ fn too_many_ops_is_a_request_error() {
     let r = run(&doc, Value::Array(ops));
     assert_eq!(r.applied, 0);
     assert_eq!(r.errors[0].index, -1);
-    assert!(r.ids.is_empty());
+    assert_eq!(r.ids.len(), 0, "no ids for an empty op list");
 }
 
 #[test]
