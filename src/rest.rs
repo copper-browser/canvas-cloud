@@ -1352,7 +1352,11 @@ fn validated_host(headers: &HeaderMap, uri: &Uri) -> Option<String> {
 
 /// `GET /join/:token` deliberately does not consult the database. It is outside `/v1`, so it is
 /// reachable before a client has an instance key and can hand the opaque token to Copper.
-pub(crate) async fn join_landing(Path(token): Path<String>, uri: Uri, headers: HeaderMap) -> Response {
+pub(crate) async fn join_landing(
+    Path(token): Path<String>,
+    uri: Uri,
+    headers: HeaderMap,
+) -> Response {
     let href = token_digest(&token).and_then(|_| {
         validated_host(&headers, &uri).map(|host| {
             format!(
