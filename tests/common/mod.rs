@@ -89,7 +89,11 @@ impl TestApp {
         let cfg = Config::for_tests(DATABASE_URL);
         let instance_key = cfg.instance_key.clone();
         let state = AppState::new(pool, cfg);
-        let router = copper_cloud_core::app(state.clone(), copper_cloud_canvas::router());
+        let router = copper_cloud_core::app_with(
+            state.clone(),
+            copper_cloud_canvas::router(),
+            copper_cloud_canvas::landing_router(),
+        );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let serve = router

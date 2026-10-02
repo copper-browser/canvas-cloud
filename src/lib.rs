@@ -47,6 +47,10 @@ pub const MAX_OPS_BODY_BYTES: usize = 4 << 20;
 /// | GET, POST | `/canvases/{id}/invites` |
 /// | GET | `/invites` |
 /// | POST | `/invites/{id}/accept`, `/invites/{id}/decline` |
+/// | POST | `/canvases/{id}/links` |
+/// | GET | `/canvases/{id}/links` |
+/// | DELETE | `/canvases/{id}/links`, `/canvases/{id}/links/{link_id}` |
+/// | GET, POST | `/canvas-links/{token}`, `/canvas-links/{token}/join` |
 /// | GET (upgrade) | `/canvases/{id}/ws` (WebSocket; HTTP/2 CONNECT too) |
 /// | GET | `/canvases/{id}/state`, `/canvases/{id}/read` |
 /// | POST | `/canvases/{id}/ops` |
@@ -56,6 +60,7 @@ pub fn router() -> Router<SharedState> {
             "/canvases",
             get(rest::list_canvases).post(rest::create_canvas),
         )
+        .route("/people", get(rest::list_people))
         .route(
             "/canvases/{id}",
             get(rest::get_canvas)
@@ -74,6 +79,18 @@ pub fn router() -> Router<SharedState> {
         .route("/invites", get(rest::my_invites))
         .route("/invites/{id}/accept", post(rest::accept_invite))
         .route("/invites/{id}/decline", post(rest::decline_invite))
+        .route(
+            "/canvases/{id}/links",
+            get(rest::list_share_links)
+                .post(rest::create_share_link)
+                .delete(rest::revoke_all_share_links),
+        )
+        .route(
+            "/canvases/{id}/links/{link_id}",
+            axum::routing::delete(rest::revoke_share_link),
+        )
+        .route("/canvas-links/{token}", get(rest::preview_share_link))
+        .route("/canvas-links/{token}/join", post(rest::join_share_link))
         // `any`: HTTP/1.1 GET upgrades and HTTP/2 extended CONNECT (RFC 8441) both work.
         .route("/canvases/{id}/ws", any(rest::ws_upgrade))
         .route("/canvases/{id}/state", get(rest::get_state))
@@ -83,4 +100,10 @@ pub fn router() -> Router<SharedState> {
             post(rest::post_ops).layer(DefaultBodyLimit::max(MAX_OPS_BODY_BYTES)),
         )
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+}
+
+/// The public landing page for web-form share links. It is merged at the application root rather
+/// than under `/v1`, so the instance-key gate does not run for it.
+pub fn landing_router() -> Router<SharedState> {
+    Router::new().route("/join/{token}", get(rest::join_landing))
 }

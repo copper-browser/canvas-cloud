@@ -6,8 +6,8 @@
 use axum::body::Bytes;
 use axum::extract::ws::rejection::WebSocketUpgradeRejection;
 use axum::extract::{FromRequest, Path, Query, Request, State, WebSocketUpgrade};
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::response::{Html, IntoResponse, Response};
 use axum::Json;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
@@ -15,6 +15,7 @@ use copper_cloud_core::auth::{user_id_by_email, AuthUser};
 use copper_cloud_core::crypto::Crypto;
 use copper_cloud_core::error::ApiError;
 use copper_cloud_core::events::Event;
+use copper_cloud_core::extract::{OptionalJsonBody, QueryParams};
 use copper_cloud_core::ids;
 use copper_cloud_core::state::{AppState, SharedState};
 use serde::de::DeserializeOwned;
@@ -167,6 +168,44 @@ pub struct InviteView {
     pub created_at: OffsetDateTime,
 }
 
+/// A share link as returned by the owner's link list.
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct ShareLinkView {
+    pub id: Uuid,
+    pub role: String,
+    pub created_by: Option<Uuid>,
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+    pub uses: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct CreatedShareLink {
+    id: Uuid,
+    token: String,
+    canvas_id: Uuid,
+    role: String,
+    #[serde(with = "time::serde::rfc3339")]
+    created_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+struct ShareLinkPreviewRow {
+    canvas_id: Uuid,
+    name: String,
+    owner_id: Uuid,
+    owner_display_name: String,
+    role: String,
+}
+
+/// `GET /people` item. This intentionally omits account state and other private fields.
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct PersonView {
+    pub id: Uuid,
+    pub display_name: String,
+    pub email: String,
+}
+
 #[derive(sqlx::FromRow)]
 struct InviteRow {
     id: Uuid,
@@ -208,6 +247,8 @@ SELECT i.id, i.canvas_id, c.name AS canvas_name, i.email, i.status, i.created_at
 FROM canvas_invites i
 JOIN canvases c ON c.id = i.canvas_id
 LEFT JOIN users u ON u.id = i.invited_by";
+
+const SHARE_LINK_NOT_FOUND: &str = "link_not_found";
 
 // ---------------------------------------------------------------------------------------------
 // Helpers
@@ -430,6 +471,17 @@ async fn display_name(state: &AppState, user: &AuthUser) -> Result<String, ApiEr
 
 fn ok() -> Json<Value> {
     Json(json!({ "ok": true }))
+}
+
+fn link_not_found() -> ApiError {
+    ApiError::NotFoundCode {
+        code: SHARE_LINK_NOT_FOUND,
+        message: "share link not found",
+    }
+}
+
+fn token_digest(token: &str) -> Option<[u8; 32]> {
+    ids::is_token_shape(token).then(|| ids::sha256(token.as_bytes()))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -771,6 +823,239 @@ pub(crate) async fn decline_invite(
 }
 
 // ---------------------------------------------------------------------------------------------
+// Share links
+
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct ShareLinkBody {
+    role: Option<String>,
+}
+
+pub(crate) async fn create_share_link(
+    State(state): State<SharedState>,
+    user: AuthUser,
+    Path(raw): Path<String>,
+    OptionalJsonBody(body): OptionalJsonBody<ShareLinkBody, { crate::MAX_BODY_BYTES }>,
+) -> Result<(StatusCode, Json<CreatedShareLink>), ApiError> {
+    let access = access(&state, user.user_id, &raw).await?;
+    if access.is_personal() {
+        return Err(ApiError::bad_request(
+            "the Personal canvas cannot be shared",
+        ));
+    }
+    match body.role.as_deref() {
+        None | Some("editor") => {}
+        Some(_) => return Err(ApiError::bad_request("share link role must be editor")),
+    }
+
+    let token = ids::random_token();
+    let digest = ids::sha256(token.as_bytes());
+    let (id, role, created_at): (Uuid, String, OffsetDateTime) = sqlx::query_as(
+        "INSERT INTO canvas_share_links (id, canvas_id, token_sha256, role, created_by)
+         VALUES ($1, $2, $3, 'editor', $4)
+         RETURNING id, role, created_at",
+    )
+    .bind(ids::uuid_v7())
+    .bind(access.canvas_id)
+    .bind(&digest[..])
+    .bind(user.user_id)
+    .fetch_one(&state.db)
+    .await?;
+    tracing::info!(user_id = %user.user_id, canvas_id = %access.canvas_id, link_id = %id, "canvas share link created");
+    Ok((
+        StatusCode::CREATED,
+        Json(CreatedShareLink {
+            id,
+            token,
+            canvas_id: access.canvas_id,
+            role,
+            created_at,
+        }),
+    ))
+}
+
+pub(crate) async fn list_share_links(
+    State(state): State<SharedState>,
+    user: AuthUser,
+    Path(raw): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let access = access(&state, user.user_id, &raw).await?;
+    if !access.is_owner() {
+        return Err(ApiError::Forbidden);
+    }
+    let links = sqlx::query_as::<_, ShareLinkView>(
+        "SELECT id, role, created_by, created_at, uses
+         FROM canvas_share_links WHERE canvas_id = $1
+         ORDER BY created_at DESC, id DESC",
+    )
+    .bind(access.canvas_id)
+    .fetch_all(&state.db)
+    .await?;
+    Ok(Json(json!({ "links": links })))
+}
+
+pub(crate) async fn revoke_share_link(
+    State(state): State<SharedState>,
+    user: AuthUser,
+    Path((raw, link_id)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    let access = access(&state, user.user_id, &raw).await?;
+    if !access.is_owner() {
+        return Err(ApiError::Forbidden);
+    }
+    let link_id = Uuid::parse_str(&link_id).map_err(|_| ApiError::NotFound)?;
+    let deleted = sqlx::query("DELETE FROM canvas_share_links WHERE id = $1 AND canvas_id = $2")
+        .bind(link_id)
+        .bind(access.canvas_id)
+        .execute(&state.db)
+        .await?
+        .rows_affected();
+    if deleted == 0 {
+        return Err(ApiError::NotFound);
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub(crate) async fn revoke_all_share_links(
+    State(state): State<SharedState>,
+    user: AuthUser,
+    Path(raw): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let access = access(&state, user.user_id, &raw).await?;
+    if !access.is_owner() {
+        return Err(ApiError::Forbidden);
+    }
+    sqlx::query("DELETE FROM canvas_share_links WHERE canvas_id = $1")
+        .bind(access.canvas_id)
+        .execute(&state.db)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn share_link_preview_row(
+    state: &AppState,
+    token: &str,
+) -> Result<ShareLinkPreviewRow, ApiError> {
+    let digest = token_digest(token).ok_or_else(link_not_found)?;
+    sqlx::query_as::<_, ShareLinkPreviewRow>(
+        "SELECT l.canvas_id, c.name, c.owner_id, u.display_name AS owner_display_name, l.role
+         FROM canvas_share_links l
+         JOIN canvases c ON c.id = l.canvas_id
+         JOIN users u ON u.id = c.owner_id
+         WHERE l.token_sha256 = $1",
+    )
+    .bind(&digest[..])
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(link_not_found)
+}
+
+pub(crate) async fn preview_share_link(
+    State(state): State<SharedState>,
+    user: AuthUser,
+    Path(token): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let row = share_link_preview_row(&state, &token).await?;
+    let member: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM canvas_members WHERE canvas_id = $1 AND user_id = $2)",
+    )
+    .bind(row.canvas_id)
+    .bind(user.user_id)
+    .fetch_one(&state.db)
+    .await?;
+    Ok(Json(json!({
+        "canvas_id": row.canvas_id,
+        "name": row.name,
+        "owner": { "id": row.owner_id, "display_name": row.owner_display_name },
+        "role": row.role,
+        "member": member,
+    })))
+}
+
+pub(crate) async fn join_share_link(
+    State(state): State<SharedState>,
+    user: AuthUser,
+    Path(token): Path<String>,
+) -> Result<Json<CanvasView>, ApiError> {
+    let digest = token_digest(&token).ok_or_else(link_not_found)?;
+    let mut tx = state.db.begin().await?;
+    let row: Option<(Uuid, String, String)> = sqlx::query_as(
+        "SELECT l.canvas_id, l.role, c.kind FROM canvas_share_links l
+         JOIN canvases c ON c.id = l.canvas_id
+         WHERE l.token_sha256 = $1 FOR UPDATE",
+    )
+    .bind(&digest[..])
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((canvas_id, role, kind)) = row else {
+        return Err(link_not_found());
+    };
+    if kind == "personal" {
+        return Err(link_not_found());
+    }
+    let added: Option<Uuid> = sqlx::query_scalar(
+        "INSERT INTO canvas_members (canvas_id, user_id, role) VALUES ($1, $2, $3)
+         ON CONFLICT (canvas_id, user_id) DO NOTHING RETURNING user_id",
+    )
+    .bind(canvas_id)
+    .bind(user.user_id)
+    .bind(&role)
+    .fetch_optional(&mut *tx)
+    .await?;
+    sqlx::query(
+        "UPDATE canvas_invites SET status = 'accepted', accepted_at = COALESCE(accepted_at, now())
+         WHERE canvas_id = $1 AND lower(email) = lower($2) AND status = 'pending'",
+    )
+    .bind(canvas_id)
+    .bind(user.email.trim())
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("UPDATE canvas_share_links SET uses = uses + 1 WHERE token_sha256 = $1")
+        .bind(&digest[..])
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    publish_members(&state, canvas_id, "member_added").await;
+    tracing::info!(user_id = %user.user_id, %canvas_id, joined = added.is_some(), "canvas share link joined");
+    Ok(Json(canvas_view(&state, user.user_id, canvas_id).await?))
+}
+
+// ---------------------------------------------------------------------------------------------
+// People
+
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct PeopleQuery {
+    q: Option<String>,
+    limit: Option<i64>,
+}
+
+pub(crate) async fn list_people(
+    State(state): State<SharedState>,
+    user: AuthUser,
+    QueryParams(q): QueryParams<PeopleQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let limit = q.limit.unwrap_or(20);
+    if limit < 1 {
+        return Err(ApiError::bad_request("limit must be at least 1"));
+    }
+    let limit = limit.min(50);
+    let needle = q.q.unwrap_or_default();
+    let people = sqlx::query_as::<_, PersonView>(
+        "SELECT id, display_name, email FROM users
+         WHERE NOT disabled AND id <> $1
+           AND ($2 = '' OR strpos(lower(display_name), lower($2)) > 0
+                OR strpos(lower(email), lower($2)) > 0)
+         ORDER BY lower(display_name), id
+         LIMIT $3",
+    )
+    .bind(user.user_id)
+    .bind(needle)
+    .bind(limit)
+    .fetch_all(&state.db)
+    .await?;
+    Ok(Json(json!({ "people": people })))
+}
+
+// ---------------------------------------------------------------------------------------------
 // Documents
 
 /// `GET /canvases/:id/ws` — upgrade to a y-websocket room.
@@ -978,6 +1263,117 @@ fn schedule_idle(state: SharedState, canvas_id: Uuid, agent_id: String, written_
             tracing::debug!(%canvas_id, error = %e, "agent idle write skipped");
         }
     });
+}
+
+// ---------------------------------------------------------------------------------------------
+// Ungated web landing page
+
+fn escape_html(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+fn percent_encode_component(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            out.push(char::from(byte));
+        } else {
+            use std::fmt::Write as _;
+            let _ = write!(out, "%{byte:02X}");
+        }
+    }
+    out
+}
+
+/// Accept only a host name/IP and an optional numeric port. In particular, reject user-info,
+/// paths and control characters before putting the value in a custom URL scheme.
+fn validated_host(headers: &HeaderMap) -> Option<String> {
+    let raw = headers.get(header::HOST)?.to_str().ok()?;
+    if raw.is_empty()
+        || raw.trim() != raw
+        || raw.chars().any(|c| c.is_control() || c.is_whitespace())
+    {
+        return None;
+    }
+    if raw.contains(['@', '/', '?', '#', '%']) {
+        return None;
+    }
+    let host = if let Some(rest) = raw.strip_prefix('[') {
+        let end = rest.find(']')?;
+        let host = &rest[..end];
+        let suffix = &rest[end + 1..];
+        if suffix.is_empty() {
+            host
+        } else {
+            let port = suffix.strip_prefix(':').filter(|p| !p.is_empty())?;
+            if port.parse::<u16>().is_err() {
+                return None;
+            }
+            host
+        }
+    } else {
+        if raw.matches(':').count() > 1 {
+            return None;
+        }
+        match raw.rsplit_once(':') {
+            Some((host, port)) if !port.is_empty() => {
+                if port.parse::<u16>().is_err() {
+                    return None;
+                }
+                host
+            }
+            Some((_, _)) => return None,
+            None => raw,
+        }
+    };
+    if host.is_empty()
+        || host.parse::<std::net::IpAddr>().is_err() && url::Host::parse(host).is_err()
+    {
+        return None;
+    }
+    Some(raw.to_owned())
+}
+
+/// `GET /join/:token` deliberately does not consult the database. It is outside `/v1`, so it is
+/// reachable before a client has an instance key and can hand the opaque token to Copper.
+pub(crate) async fn join_landing(Path(token): Path<String>, headers: HeaderMap) -> Response {
+    let href = token_digest(&token).and_then(|_| {
+        validated_host(&headers).map(|host| {
+            format!(
+                "copper://canvas/join/{}?cloud={}",
+                percent_encode_component(&token),
+                host
+            )
+        })
+    });
+    let html = match href {
+        Some(href) => format!(
+            "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Open canvas in Copper</title><style>body{{margin:0;min-height:100vh;display:grid;place-items:center;background:#f7f7f5;color:#171717;font:16px system-ui,sans-serif}}main{{max-width:28rem;padding:2rem;text-align:center}}a{{display:inline-block;padding:.75rem 1.1rem;border-radius:.5rem;background:#171717;color:#fff;text-decoration:none}}a:focus-visible{{outline:3px solid #6d5dfc;outline-offset:3px}}</style></head><body><main><h1>Canvas share link</h1><p>Open this canvas in Copper to continue.</p><a href=\"{}\">Open this canvas in Copper</a></main></body></html>",
+            escape_html(&href)
+        ),
+        None => "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Open canvas in Copper</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f7f7f5;color:#171717;font:16px system-ui,sans-serif}main{max-width:28rem;padding:2rem;text-align:center}</style></head><body><main><h1>Canvas share link</h1><p>Open this link in Copper to continue.</p></main></body></html>".to_owned(),
+    };
+    let mut response = Html(html).into_response();
+    let headers = response.headers_mut();
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("default-src 'none'; style-src 'unsafe-inline'"),
+    );
+    response
 }
 
 #[cfg(test)]

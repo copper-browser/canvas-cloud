@@ -4,9 +4,12 @@
 
 mod common;
 
-use axum::http::{Method, StatusCode};
+use axum::body::Body;
+use axum::http::{Method, Request, StatusCode};
 use common::TestApp;
+use http_body_util::BodyExt as _;
 use serde_json::{json, Value};
+use tower::ServiceExt as _;
 use yrs::{Map as _, Out, ReadTxn as _, Transact as _};
 
 fn ids(list: &Value) -> Vec<String> {
@@ -425,6 +428,185 @@ async fn read_and_state_endpoints() {
     assert_eq!(only["shapes"].as_array().unwrap().len(), 1, "{only}");
     assert_eq!(only["shapes"][0]["id"], "l1");
     assert_eq!(only["count"], 3);
+}
+
+#[tokio::test]
+async fn share_links_people_and_landing() {
+    let app = TestApp::new().await;
+    let owner = app.user("owner").await;
+    let editor = app.user("editor").await;
+    let guest = app.user("guest").await;
+    let disabled = app.user("disabled").await;
+    let id = app.canvas(&owner, "Shared").await;
+    app.share(&owner, &id, &editor).await;
+    let base = format!("/canvases/{id}");
+    let (s, _) = app.post(&guest, &format!("{base}/links"), json!({})).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+
+    let (s, created) = app.post(&owner, &format!("{base}/links"), json!({})).await;
+    assert_eq!(s, StatusCode::CREATED, "{created}");
+    let token = created["token"].as_str().unwrap().to_owned();
+    assert_eq!(token.len(), 43);
+    assert_eq!(created["role"], "editor");
+    let stored: Vec<u8> =
+        sqlx::query_scalar("SELECT token_sha256 FROM canvas_share_links WHERE id = $1::uuid")
+            .bind(created["id"].as_str().unwrap())
+            .fetch_one(app.db())
+            .await
+            .unwrap();
+    assert_eq!(
+        stored.as_slice(),
+        &copper_cloud_core::ids::sha256(token.as_bytes())
+    );
+    assert_ne!(stored.as_slice(), token.as_bytes());
+
+    let (s, list) = app.get(&owner, &format!("{base}/links")).await;
+    assert_eq!(s, StatusCode::OK, "{list}");
+    assert_eq!(list["links"].as_array().unwrap().len(), 1);
+    assert!(list["links"][0].get("token").is_none());
+    let link_id = created["id"].as_str().unwrap();
+    let (s, _) = app.get(&editor, &format!("{base}/links")).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, _) = app
+        .delete(&editor, &format!("{base}/links/{link_id}"))
+        .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, by_editor) = app
+        .post(&editor, &format!("{base}/links"), json!({"role":"editor"}))
+        .await;
+    assert_eq!(s, StatusCode::CREATED, "{by_editor}");
+    let (s, _) = app
+        .post(&owner, &format!("{base}/links"), json!({"role":"owner"}))
+        .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+
+    let (s, preview) = app.get(&guest, &format!("/canvas-links/{token}")).await;
+    assert_eq!(s, StatusCode::OK, "{preview}");
+    assert_eq!(preview["member"], false);
+    assert_eq!(preview["owner"]["id"], owner.id.to_string());
+    let (s, _) = app
+        .post(
+            &owner,
+            &format!("{base}/invites"),
+            json!({"email":guest.email}),
+        )
+        .await;
+    assert_eq!(s, StatusCode::CREATED);
+    let (s, joined) = app
+        .post(&guest, &format!("/canvas-links/{token}/join"), Value::Null)
+        .await;
+    assert_eq!(s, StatusCode::OK, "{joined}");
+    assert_eq!(joined["role"], "editor");
+    let (s, invites) = app.get(&guest, "/invites").await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(invites.as_array().unwrap().len(), 0);
+    // Retry is idempotent, and joining as the owner never downgrades them.
+    let (s, _) = app
+        .post(&guest, &format!("/canvas-links/{token}/join"), Value::Null)
+        .await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, owner_joined) = app
+        .post(&owner, &format!("/canvas-links/{token}/join"), Value::Null)
+        .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(owner_joined["role"], "owner");
+    let uses: i64 = sqlx::query_scalar("SELECT uses FROM canvas_share_links WHERE id = $1::uuid")
+        .bind(link_id)
+        .fetch_one(app.db())
+        .await
+        .unwrap();
+    assert_eq!(uses, 3);
+
+    let (s, _) = app.delete(&owner, &format!("{base}/links/{link_id}")).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let (s, err) = app.get(&guest, &format!("/canvas-links/{token}")).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    assert_eq!(err["error"], "link_not_found");
+    let (s, _) = app
+        .post(&guest, &format!("/canvas-links/{token}/join"), Value::Null)
+        .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+
+    let (s, second) = app.post(&owner, &format!("{base}/links"), json!({})).await;
+    assert_eq!(s, StatusCode::CREATED);
+    let second_token = second["token"].as_str().unwrap();
+    let (s, _) = app.delete(&owner, &format!("{base}/links")).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let (s, _) = app
+        .get(&owner, &format!("/canvas-links/{second_token}"))
+        .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let (s, third) = app.post(&owner, &format!("{base}/links"), json!({})).await;
+    assert_eq!(s, StatusCode::CREATED);
+    let third_token = third["token"].as_str().unwrap();
+    let (s, people) = app
+        .get(&guest, &format!("/people?q={}", editor.email))
+        .await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _) = app.call(None, Method::GET, "/people", None).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    assert_eq!(people["people"].as_array().unwrap().len(), 1);
+    assert_eq!(people["people"][0]["display_name"], "editor");
+    sqlx::query("UPDATE users SET disabled = true WHERE id = $1")
+        .bind(disabled.id)
+        .execute(app.db())
+        .await
+        .unwrap();
+    let (s, people) = app
+        .get(&guest, &format!("/people?q={}", disabled.email))
+        .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(people["people"].as_array().unwrap().len(), 0);
+
+    let (s, _) = app.delete(&owner, &base).await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _) = app
+        .get(&guest, &format!("/canvas-links/{third_token}"))
+        .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri(format!("/join/{token}"))
+        .header("host", "cloud.example:443")
+        .body(Body::empty())
+        .unwrap();
+    let response = app.router.clone().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    assert_eq!(response.headers()["referrer-policy"], "no-referrer");
+    assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+    assert_eq!(
+        response.headers()["content-security-policy"],
+        "default-src 'none'; style-src 'unsafe-inline'"
+    );
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let html = String::from_utf8(body.to_vec()).unwrap();
+    assert!(html.contains("copper://canvas/join/"));
+    assert!(html.contains("cloud=cloud.example:443"));
+
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri(format!("/join/{token}"))
+        .header("host", "[::1]")
+        .body(Body::empty())
+        .unwrap();
+    let response = app.router.clone().oneshot(req).await.unwrap();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let html = String::from_utf8(body.to_vec()).unwrap();
+    assert!(html.contains("cloud=[::1]"));
+
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri(format!("/join/{token}"))
+        .header("host", "<bad>")
+        .body(Body::empty())
+        .unwrap();
+    let response = app.router.clone().oneshot(req).await.unwrap();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let html = String::from_utf8(body.to_vec()).unwrap();
+    assert!(!html.contains("copper://"));
+    assert!(!html.contains("<bad>"));
 }
 
 fn urlencode(s: &str) -> String {
