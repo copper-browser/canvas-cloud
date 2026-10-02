@@ -6,7 +6,7 @@
 use axum::body::Bytes;
 use axum::extract::ws::rejection::WebSocketUpgradeRejection;
 use axum::extract::{FromRequest, Path, Query, Request, State, WebSocketUpgrade};
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Response};
 use axum::Json;
 use base64::engine::general_purpose::STANDARD;
@@ -1292,8 +1292,19 @@ fn percent_encode_component(value: &str) -> String {
 
 /// Accept only a host name/IP and an optional numeric port. In particular, reject user-info,
 /// paths and control characters before putting the value in a custom URL scheme.
-fn validated_host(headers: &HeaderMap) -> Option<String> {
-    let raw = headers.get(header::HOST)?.to_str().ok()?;
+fn validated_host(headers: &HeaderMap, uri: &Uri) -> Option<String> {
+    // HTTP/1.1 carries the target in a literal `Host` header; HTTP/2 (our
+    // only transport once TLS is on, since rustls negotiates h2 by ALPN)
+    // forbids that header and sends `:authority` instead, which hyper/h2
+    // surface as the request URI's authority, not a header — so a host
+    // taken from headers alone is always absent on this listener.
+    let from_header = headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let from_authority = uri.authority().map(|a| a.as_str().to_owned());
+    let raw = from_header.or(from_authority)?;
+    let raw = raw.as_str();
     if raw.is_empty()
         || raw.trim() != raw
         || raw.chars().any(|c| c.is_control() || c.is_whitespace())
@@ -1341,9 +1352,9 @@ fn validated_host(headers: &HeaderMap) -> Option<String> {
 
 /// `GET /join/:token` deliberately does not consult the database. It is outside `/v1`, so it is
 /// reachable before a client has an instance key and can hand the opaque token to Copper.
-pub(crate) async fn join_landing(Path(token): Path<String>, headers: HeaderMap) -> Response {
+pub(crate) async fn join_landing(Path(token): Path<String>, uri: Uri, headers: HeaderMap) -> Response {
     let href = token_digest(&token).and_then(|_| {
-        validated_host(&headers).map(|host| {
+        validated_host(&headers, &uri).map(|host| {
             format!(
                 "copper://canvas/join/{}?cloud={}",
                 percent_encode_component(&token),
@@ -1379,6 +1390,33 @@ pub(crate) async fn join_landing(Path(token): Path<String>, headers: HeaderMap) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_falls_back_to_authority_when_no_host_header() {
+        // HTTP/2 requests never carry a literal `Host` header (RFC 9113 §8.3.1
+        // forbids it); hyper/h2 surface the `:authority` pseudo-header as the
+        // request URI's authority instead. The join landing page is only ever
+        // served over h2 once TLS is on, so this path must work from the URI
+        // alone, not just from headers.
+        let empty = HeaderMap::new();
+        let uri: Uri = "https://127.0.0.1:8445/join/abc".parse().unwrap();
+        assert_eq!(
+            validated_host(&empty, &uri).as_deref(),
+            Some("127.0.0.1:8445")
+        );
+
+        // A literal Host header (HTTP/1.1) still wins when present.
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("example.com"));
+        assert_eq!(
+            validated_host(&headers, &uri).as_deref(),
+            Some("example.com")
+        );
+
+        // Neither a header nor a URI authority: no host to offer.
+        let relative: Uri = "/join/abc".parse().unwrap();
+        assert_eq!(validated_host(&empty, &relative), None);
+    }
 
     #[test]
     fn names() {
