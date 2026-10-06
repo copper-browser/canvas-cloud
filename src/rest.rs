@@ -161,11 +161,27 @@ pub struct InviteView {
     pub canvas_id: Uuid,
     pub canvas_name: String,
     pub email: String,
-    /// `pending` | `accepted` | `declined`.
+    /// `pending` | `accepted` | `declined` | `revoked`.
     pub status: String,
     pub invited_by: Option<UserRef>,
+    /// The account `email` belongs to, or `None` while nobody has signed up with it.
+    pub invitee: Option<UserRef>,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
+    /// When the invite was last re-sent as a reminder; `None` until the first one.
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub nudged_at: Option<OffsetDateTime>,
+}
+
+/// `POST /canvases/:id/invites` response: the invite plus whether this call reminded the
+/// invitee of an invite that was already pending.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct InviteSent {
+    #[serde(flatten)]
+    invite: InviteView,
+    /// `true` only on a `200` re-send that notified the invitee; `false` on a new invite
+    /// (`201`, which notifies on its own), when throttled, or when the email has no account yet.
+    nudged: bool,
 }
 
 /// A share link as returned by the owner's link list.
@@ -214,39 +230,55 @@ struct InviteRow {
     email: String,
     status: String,
     created_at: OffsetDateTime,
+    nudged_at: Option<OffsetDateTime>,
     inviter_id: Option<Uuid>,
     inviter_email: Option<String>,
     inviter_display_name: Option<String>,
+    invitee_id: Option<Uuid>,
+    invitee_email: Option<String>,
+    invitee_display_name: Option<String>,
+}
+
+fn user_ref(id: Option<Uuid>, email: Option<String>, name: Option<String>) -> Option<UserRef> {
+    match (id, email) {
+        (Some(id), Some(email)) => Some(UserRef {
+            id,
+            email,
+            display_name: name.unwrap_or_default(),
+        }),
+        _ => None,
+    }
 }
 
 impl From<InviteRow> for InviteView {
     fn from(r: InviteRow) -> Self {
-        let invited_by = match (r.inviter_id, r.inviter_email) {
-            (Some(id), Some(email)) => Some(UserRef {
-                id,
-                email,
-                display_name: r.inviter_display_name.unwrap_or_default(),
-            }),
-            _ => None,
-        };
         Self {
             id: r.id,
             canvas_id: r.canvas_id,
             canvas_name: r.canvas_name,
             email: r.email,
             status: r.status,
-            invited_by,
+            invited_by: user_ref(r.inviter_id, r.inviter_email, r.inviter_display_name),
+            invitee: user_ref(r.invitee_id, r.invitee_email, r.invitee_display_name),
             created_at: r.created_at,
+            nudged_at: r.nudged_at,
         }
     }
 }
 
+/// `invitee` joins on the lower-cased address (`users_email_lower_key`); invite emails are
+/// stored lower-cased.
 const INVITE_VIEW_SQL: &str = "
-SELECT i.id, i.canvas_id, c.name AS canvas_name, i.email, i.status, i.created_at,
-       u.id AS inviter_id, u.email AS inviter_email, u.display_name AS inviter_display_name
+SELECT i.id, i.canvas_id, c.name AS canvas_name, i.email, i.status, i.created_at, i.nudged_at,
+       u.id AS inviter_id, u.email AS inviter_email, u.display_name AS inviter_display_name,
+       v.id AS invitee_id, v.email AS invitee_email, v.display_name AS invitee_display_name
 FROM canvas_invites i
 JOIN canvases c ON c.id = i.canvas_id
-LEFT JOIN users u ON u.id = i.invited_by";
+LEFT JOIN users u ON u.id = i.invited_by
+LEFT JOIN users v ON lower(v.email) = i.email";
+
+/// Re-sending a pending invite reminds the invitee at most once per this many seconds.
+pub const INVITE_NUDGE_INTERVAL_SECS: u32 = 30;
 
 const SHARE_LINK_NOT_FOUND: &str = "link_not_found";
 
@@ -674,7 +706,7 @@ pub(crate) async fn create_invite(
     user: AuthUser,
     Path(raw): Path<String>,
     Body(body): Body<InviteBody>,
-) -> Result<(StatusCode, Json<InviteView>), ApiError> {
+) -> Result<(StatusCode, Json<InviteSent>), ApiError> {
     let a = access(&state, user.user_id, &raw).await?;
     if a.is_personal() {
         return Err(ApiError::bad_request(
@@ -714,26 +746,106 @@ pub(crate) async fn create_invite(
     .bind(&token)
     .fetch_optional(&state.db)
     .await?;
-    let (status, id) = if let Some(id) = created {
-        (StatusCode::CREATED, id)
-    } else {
-        let id: Uuid = sqlx::query_scalar(
-            "SELECT id FROM canvas_invites
-             WHERE canvas_id = $1 AND email = $2 AND status = 'pending'",
-        )
-        .bind(a.canvas_id)
-        .bind(&email)
-        .fetch_one(&state.db)
-        .await?;
-        (StatusCode::OK, id)
-    };
-    if status == StatusCode::CREATED {
+    let invitee = user_id_by_email(&state.db, &email).await?;
+    let (status, id, nudged) = if let Some(id) = created {
         tracing::info!(user_id = %user.user_id, canvas_id = %a.canvas_id, invite_id = %id, "canvas invite created");
-        if let Some(invitee) = user_id_by_email(&state.db, &email).await? {
+        if let Some(invitee) = invitee {
             publish(&state, &[invitee], a.canvas_id, "invited");
         }
+        (StatusCode::CREATED, id, false)
+    } else {
+        let (id, nudged) = nudge_invite(&state, a.canvas_id, &email, invitee.is_some()).await?;
+        if nudged {
+            tracing::info!(user_id = %user.user_id, canvas_id = %a.canvas_id, invite_id = %id, "canvas invite re-sent");
+            if let Some(invitee) = invitee {
+                publish(&state, &[invitee], a.canvas_id, "invited");
+            }
+        }
+        (StatusCode::OK, id, nudged)
+    };
+    let invite = invite_view(&state, id).await?;
+    Ok((status, Json(InviteSent { invite, nudged })))
+}
+
+/// The pending invite of `email` to `canvas_id`, re-sent: when the invitee has an account and
+/// the last reminder (or the invite itself) is older than [`INVITE_NUDGE_INTERVAL_SECS`],
+/// stamps `nudged_at` and returns `true` (the caller notifies the invitee). The conditional
+/// `UPDATE` makes concurrent re-sends remind at most once per interval.
+async fn nudge_invite(
+    state: &AppState,
+    canvas_id: Uuid,
+    email: &str,
+    has_account: bool,
+) -> Result<(Uuid, bool), ApiError> {
+    if has_account {
+        let nudged: Option<Uuid> = sqlx::query_scalar(
+            "UPDATE canvas_invites SET nudged_at = now()
+             WHERE canvas_id = $1 AND email = $2 AND status = 'pending'
+               AND COALESCE(nudged_at, created_at) <= now() - make_interval(secs => $3)
+             RETURNING id",
+        )
+        .bind(canvas_id)
+        .bind(email)
+        .bind(f64::from(INVITE_NUDGE_INTERVAL_SECS))
+        .fetch_optional(&state.db)
+        .await?;
+        if let Some(id) = nudged {
+            return Ok((id, true));
+        }
     }
-    Ok((status, Json(invite_view(&state, id).await?)))
+    // Throttled or no account yet. (An invite accepted, declined or revoked in between makes
+    // this a 404.)
+    let id: Uuid = sqlx::query_scalar(
+        "SELECT id FROM canvas_invites
+         WHERE canvas_id = $1 AND email = $2 AND status = 'pending'",
+    )
+    .bind(canvas_id)
+    .bind(email)
+    .fetch_one(&state.db)
+    .await?;
+    Ok((id, false))
+}
+
+/// `DELETE /canvases/:id/invites/:invite_id` — the canvas owner or the original inviter
+/// withdraws a pending invite (`204`). Other members get `403`; an unknown invite, one of
+/// another canvas, or one that is no longer pending is `404`.
+pub(crate) async fn revoke_invite(
+    State(state): State<SharedState>,
+    user: AuthUser,
+    Path((raw, invite)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    let a = access(&state, user.user_id, &raw).await?;
+    let invite_id = Uuid::parse_str(&invite).map_err(|_| ApiError::NotFound)?;
+    let row: Option<(Option<Uuid>, String)> = sqlx::query_as(
+        "SELECT invited_by, email FROM canvas_invites
+         WHERE id = $1 AND canvas_id = $2 AND status = 'pending'",
+    )
+    .bind(invite_id)
+    .bind(a.canvas_id)
+    .fetch_optional(&state.db)
+    .await?;
+    let (inviter, email) = row.ok_or(ApiError::NotFound)?;
+    if !a.is_owner() && inviter != Some(user.user_id) {
+        return Err(ApiError::Forbidden);
+    }
+    let revoked = sqlx::query(
+        "UPDATE canvas_invites SET status = 'revoked'
+         WHERE id = $1 AND canvas_id = $2 AND status = 'pending'",
+    )
+    .bind(invite_id)
+    .bind(a.canvas_id)
+    .execute(&state.db)
+    .await?
+    .rows_affected();
+    if revoked == 0 {
+        // Accepted, declined or revoked between the two statements.
+        return Err(ApiError::NotFound);
+    }
+    tracing::info!(user_id = %user.user_id, canvas_id = %a.canvas_id, %invite_id, "canvas invite revoked");
+    if let Some(invitee) = user_id_by_email(&state.db, &email).await? {
+        publish(&state, &[invitee], a.canvas_id, "invite_revoked");
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub(crate) async fn list_canvas_invites(

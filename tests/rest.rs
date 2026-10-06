@@ -302,6 +302,249 @@ async fn invite_accept_decline_and_leave() {
     assert_eq!(s, StatusCode::NOT_FOUND);
 }
 
+/// Drains the `canvas` events queued for one subscriber: `(canvas_id, kind)` pairs.
+fn canvas_events(
+    rx: &mut tokio::sync::broadcast::Receiver<copper_cloud_core::events::Event>,
+) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        if let copper_cloud_core::events::Event::Canvas { canvas_id, kind } = ev {
+            out.push((canvas_id.to_string(), kind));
+        }
+    }
+    out
+}
+
+fn no_events() -> Vec<(String, String)> {
+    Vec::new()
+}
+
+/// Moves an invite's last-notified time back so the re-send throttle has elapsed.
+async fn age_invite(app: &TestApp, invite: &str) {
+    sqlx::query(
+        "UPDATE canvas_invites
+         SET created_at = created_at - interval '1 minute',
+             nudged_at = nudged_at - interval '1 minute'
+         WHERE id = $1::uuid",
+    )
+    .bind(invite)
+    .execute(app.db())
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn reinvite_nudges_the_invitee_at_most_every_30_seconds() {
+    assert_eq!(copper_cloud_canvas::INVITE_NUDGE_INTERVAL_SECS, 30);
+    let app = TestApp::new().await;
+    let a = app.user("owner").await;
+    let b = app.user("bob").await;
+    let e = app.user("eve").await;
+    let id = app.canvas(&a, "Nudges").await;
+    app.share(&a, &id, &e).await;
+    let invites = format!("/canvases/{id}/invites");
+    let mut bob_events = app.state.events.subscribe(b.id);
+
+    // A new invite: 201, notifies the invitee, names their account, not a nudge.
+    let (s, inv) = app.post(&a, &invites, json!({ "email": b.email })).await;
+    assert_eq!(s, StatusCode::CREATED, "{inv}");
+    assert_eq!(inv["nudged"], false);
+    assert_eq!(inv["nudged_at"], Value::Null);
+    assert_eq!(inv["invitee"]["id"], b.id.to_string());
+    assert_eq!(inv["invitee"]["email"], b.email);
+    assert_eq!(inv["invitee"]["display_name"], "bob");
+    let inv_id = inv["id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        canvas_events(&mut bob_events),
+        vec![(id.clone(), "invited".to_owned())]
+    );
+
+    // Re-sent right away: still pending (200, same invite) but throttled — no event.
+    let (s, again) = app.post(&a, &invites, json!({ "email": b.email })).await;
+    assert_eq!(s, StatusCode::OK, "{again}");
+    assert_eq!(again["id"], inv_id.as_str());
+    assert_eq!(again["nudged"], false);
+    assert_eq!(again["nudged_at"], Value::Null);
+    assert_eq!(canvas_events(&mut bob_events), no_events());
+
+    // Once the interval has passed, a re-send is a nudge: nudged_at set, invitee notified.
+    age_invite(&app, &inv_id).await;
+    let (s, nudge) = app
+        .post(&a, &invites, json!({ "email": b.email.to_uppercase() }))
+        .await;
+    assert_eq!(s, StatusCode::OK, "{nudge}");
+    assert_eq!(nudge["id"], inv_id.as_str());
+    assert_eq!(nudge["nudged"], true);
+    let nudged_at = nudge["nudged_at"].as_str().unwrap().to_owned();
+    assert_eq!(
+        canvas_events(&mut bob_events),
+        vec![(id.clone(), "invited".to_owned())]
+    );
+
+    // And it throttles again from nudged_at.
+    let (s, again) = app.post(&a, &invites, json!({ "email": b.email })).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(again["nudged"], false);
+    assert_eq!(again["nudged_at"], nudged_at.as_str());
+    assert_eq!(canvas_events(&mut bob_events), no_events());
+
+    // Any member who may invite may re-send.
+    age_invite(&app, &inv_id).await;
+    let (s, by_editor) = app.post(&e, &invites, json!({ "email": b.email })).await;
+    assert_eq!(s, StatusCode::OK, "{by_editor}");
+    assert_eq!(by_editor["nudged"], true);
+    assert_eq!(canvas_events(&mut bob_events).len(), 1);
+
+    // Both lists carry nudged_at and invitee; the inviter is unchanged.
+    let (_, mine) = app.get(&b, "/invites").await;
+    assert_eq!(mine.as_array().unwrap().len(), 1, "{mine}");
+    assert!(mine[0]["nudged_at"].is_string());
+    assert_eq!(mine[0]["invitee"]["id"], b.id.to_string());
+    assert_eq!(mine[0]["invited_by"]["id"], a.id.to_string());
+    assert!(mine[0].get("nudged").is_none(), "only POST says nudged");
+    let (_, pending) = app.get(&a, &invites).await;
+    assert_eq!(pending[0]["id"], inv_id.as_str());
+    assert!(pending[0]["nudged_at"].is_string());
+    assert_eq!(pending[0]["invitee"]["email"], b.email);
+
+    // No account with that email yet: invitee is null and a re-send cannot notify anyone.
+    let later = format!("later-{}@example.test", &inv_id[24..]);
+    let (s, ghost) = app.post(&a, &invites, json!({ "email": later })).await;
+    assert_eq!(s, StatusCode::CREATED, "{ghost}");
+    assert_eq!(ghost["invitee"], Value::Null);
+    assert_eq!(ghost["nudged"], false);
+    let ghost_id = ghost["id"].as_str().unwrap().to_owned();
+    age_invite(&app, &ghost_id).await;
+    let (s, ghost) = app.post(&a, &invites, json!({ "email": later })).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(ghost["id"], ghost_id.as_str());
+    assert_eq!(ghost["nudged"], false);
+    assert_eq!(ghost["nudged_at"], Value::Null);
+    assert_eq!(ghost["invitee"], Value::Null);
+    let (_, pending) = app.get(&a, &invites).await;
+    assert_eq!(pending.as_array().unwrap().len(), 2);
+    assert_eq!(pending[0]["invitee"], Value::Null, "newest first");
+
+    // Accepting still works on a nudged invite.
+    let (s, v) = app
+        .post(&b, &format!("/invites/{inv_id}/accept"), Value::Null)
+        .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+}
+
+#[tokio::test]
+async fn owner_or_inviter_revokes_a_pending_invite() {
+    let app = TestApp::new().await;
+    let a = app.user("owner").await;
+    let b = app.user("bob").await;
+    let e = app.user("eve").await;
+    let f = app.user("fay").await;
+    let x = app.user("stranger").await;
+    let id = app.canvas(&a, "Revocable").await;
+    let other = app.canvas(&a, "Other").await;
+    app.share(&a, &id, &e).await;
+    app.share(&a, &id, &f).await;
+    let invites = format!("/canvases/{id}/invites");
+    let mut bob_events = app.state.events.subscribe(b.id);
+
+    let (s, inv) = app.post(&a, &invites, json!({ "email": b.email })).await;
+    assert_eq!(s, StatusCode::CREATED);
+    let inv_id = inv["id"].as_str().unwrap().to_owned();
+    let one = format!("{invites}/{inv_id}");
+    canvas_events(&mut bob_events);
+
+    // Another member (neither owner nor inviter) may not; outsiders and wrong paths are 404.
+    let (s, v) = app.delete(&e, &one).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{v}");
+    assert_eq!(v["error"], "forbidden");
+    let (s, _) = app.delete(&x, &one).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let (s, _) = app.delete(&b, &one).await;
+    assert_eq!(s, StatusCode::NOT_FOUND, "the invitee is not a member");
+    let (s, _) = app
+        .delete(&a, &format!("/canvases/{other}/invites/{inv_id}"))
+        .await;
+    assert_eq!(s, StatusCode::NOT_FOUND, "invite of another canvas");
+    let (s, _) = app.delete(&a, &format!("{invites}/not-a-uuid")).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    assert_eq!(canvas_events(&mut bob_events), no_events());
+
+    // The owner revokes: 204, the invitee is told and no longer sees it.
+    let (s, v) = app.delete(&a, &one).await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "{v}");
+    assert_eq!(v, Value::Null);
+    assert_eq!(
+        canvas_events(&mut bob_events),
+        vec![(id.clone(), "invite_revoked".to_owned())]
+    );
+    let status: String =
+        sqlx::query_scalar("SELECT status FROM canvas_invites WHERE id = $1::uuid")
+            .bind(&inv_id)
+            .fetch_one(app.db())
+            .await
+            .unwrap();
+    assert_eq!(status, "revoked");
+    let (_, mine) = app.get(&b, "/invites").await;
+    assert_eq!(mine, json!([]));
+    let (_, pending) = app.get(&a, &invites).await;
+    assert_eq!(pending, json!([]));
+    let (s, _) = app
+        .post(&b, &format!("/invites/{inv_id}/accept"), Value::Null)
+        .await;
+    assert_eq!(
+        s,
+        StatusCode::NOT_FOUND,
+        "revoked invites cannot be accepted"
+    );
+    let (s, _) = app
+        .post(&b, &format!("/invites/{inv_id}/decline"), Value::Null)
+        .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+
+    // Twice is 404.
+    let (s, v) = app.delete(&a, &one).await;
+    assert_eq!(s, StatusCode::NOT_FOUND, "{v}");
+    assert_eq!(v["error"], "not_found");
+
+    // The slot is free again: a fresh invite is a new 201.
+    let (s, fresh) = app.post(&a, &invites, json!({ "email": b.email })).await;
+    assert_eq!(s, StatusCode::CREATED, "{fresh}");
+    assert_ne!(fresh["id"], inv_id.as_str());
+
+    // An editor revokes their own invite (not someone else's); the owner can revoke any.
+    let (s, finv) = app
+        .post(&e, &invites, json!({ "email": "nobody-yet@example.test" }))
+        .await;
+    assert_eq!(s, StatusCode::CREATED);
+    let finv = format!("{invites}/{}", finv["id"].as_str().unwrap());
+    let (s, _) = app.delete(&f, &finv).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, _) = app.delete(&e, &finv).await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "the inviter may revoke");
+    let (s, _) = app
+        .delete(&e, &format!("{invites}/{}", fresh["id"].as_str().unwrap()))
+        .await;
+    assert_eq!(
+        s,
+        StatusCode::FORBIDDEN,
+        "an editor cannot revoke the owner's invite"
+    );
+
+    // A pending invite from an editor who has since left can still be revoked by the owner.
+    let (s, ginv) = app
+        .post(&f, &invites, json!({ "email": "someone@example.test" }))
+        .await;
+    assert_eq!(s, StatusCode::CREATED);
+    let (s, _) = app
+        .delete(&f, &format!("/canvases/{id}/members/{}", f.id))
+        .await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _) = app
+        .delete(&a, &format!("{invites}/{}", ginv["id"].as_str().unwrap()))
+        .await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+}
+
 #[tokio::test]
 async fn non_members_get_404_everywhere() {
     let app = TestApp::new().await;

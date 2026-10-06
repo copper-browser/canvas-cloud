@@ -24,7 +24,10 @@ pub mod shape;
 mod store;
 mod ws;
 
-pub use rest::{ensure_personal_canvas, CanvasView, InviteView, MemberView, UserRef, PERSONAL};
+pub use rest::{
+    ensure_personal_canvas, CanvasView, InviteView, MemberView, UserRef,
+    INVITE_NUDGE_INTERVAL_SECS, PERSONAL,
+};
 pub use room::{
     close_all_rooms, evict_room_now, room_in_memory, rooms_metrics, RoomsMetrics,
     BROADCAST_CAPACITY, COMPACT_EVERY, EVENT_THROTTLE, IDLE_EVICT,
@@ -45,6 +48,7 @@ pub const MAX_OPS_BODY_BYTES: usize = 4 << 20;
 /// | GET | `/canvases/{id}/members` |
 /// | DELETE | `/canvases/{id}/members/{user_id}` |
 /// | GET, POST | `/canvases/{id}/invites` |
+/// | DELETE | `/canvases/{id}/invites/{invite_id}` |
 /// | GET | `/invites` |
 /// | POST | `/invites/{id}/accept`, `/invites/{id}/decline` |
 /// | POST | `/canvases/{id}/links` |
@@ -75,6 +79,10 @@ pub fn router() -> Router<SharedState> {
         .route(
             "/canvases/{id}/invites",
             get(rest::list_canvas_invites).post(rest::create_invite),
+        )
+        .route(
+            "/canvases/{id}/invites/{invite_id}",
+            delete(rest::revoke_invite),
         )
         .route("/invites", get(rest::my_invites))
         .route("/invites/{id}/accept", post(rest::accept_invite))
