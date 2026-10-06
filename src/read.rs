@@ -5,6 +5,7 @@ use serde::Serialize;
 use serde_json::Value;
 use yrs::{Doc, Map as _, ReadTxn, Transact as _};
 
+use crate::checklist::{row_summaries, ser_tally, tally, RowSummary};
 use crate::geometry::{contains_box, js_round};
 use crate::ops::read_agent;
 use crate::schema::{jnum, js_len, js_slice, out_to_json, ser_num, ser_opt_num, ShapeType, AGENTS};
@@ -89,6 +90,15 @@ pub struct ShapeSummary {
     pub natural_h: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// A checklist's columns.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub columns: Option<Vec<String>>,
+    /// A checklist's rows, each with its pick (and who made it, when).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rows: Option<Vec<RowSummary>>,
+    /// A checklist's count per column, in column order.
+    #[serde(skip_serializing_if = "Option::is_none", serialize_with = "ser_tally")]
+    pub tally: Option<Vec<(String, u64)>>,
     /// The innermost frame this shape sits in.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub frame: Option<String>,
@@ -204,6 +214,9 @@ fn summarize(s: &Shape, all: &[Shape], frames: &[&Shape], full: bool) -> ShapeSu
         natural_w: None,
         natural_h: None,
         url: None,
+        columns: None,
+        rows: None,
+        tally: None,
         frame: None,
     };
     match s.kind {
@@ -233,6 +246,13 @@ fn summarize(s: &Shape, all: &[Shape], frames: &[&Shape], full: bool) -> ShapeSu
         ShapeType::Link => {
             sum.url = Some(s.url.clone());
             sum.title = Some(clip(&s.title, full));
+        }
+        ShapeType::Checklist => {
+            sum.title = Some(clip(&s.title, full));
+            let c = s.checklist.clone().unwrap_or_default();
+            sum.tally = Some(tally(&c));
+            sum.rows = Some(row_summaries(&c));
+            sum.columns = Some(c.columns);
         }
     }
     if !s.is_arrow() {
@@ -335,6 +355,7 @@ mod tests {
     fn ctx() -> OpsCtx {
         OpsCtx {
             by: "Ann".into(),
+            by_id: "u-ann".into(),
             now_ms: 7,
             confirm_clear: false,
             origin: Point { x: 0.0, y: 0.0 },

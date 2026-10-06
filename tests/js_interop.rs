@@ -8,7 +8,8 @@
 //!
 //! It proves: a stock `y-websocket` `WebsocketProvider` syncs through the room both ways,
 //! awareness relays between JS peers, ops applied by the page reach the server and vice
-//! versa, and the server's `/read` equals the page's `readCanvas` on the same document.
+//! versa, and the server's `/read` equals the page's `readCanvas` on the same document —
+//! checklists included (the page must have `src/canvas/checklist.ts`).
 
 #![allow(clippy::too_many_lines)]
 
@@ -72,6 +73,8 @@ try {
         { op: 'update', id: 'srv1', patch: { text: 'edited by js' } },
         { op: 'connect', id: 'jsarrow', from: 'js1', to: 'srv1', label: 'js arrow' },
         { op: 'add', shape: { id: 'jsframe', type: 'frame', title: 'Group', x: -100, y: 500, w: 600, h: 400 } },
+        { op: 'update', id: 'srvlist', patch: { picks: { Bob: 'No' }, rows: ['Ann', 'Bob', 'Cy', 'Dee'], columns: ['Yes', 'No', 'Maybe'] } },
+        { op: 'add', shape: { id: 'jslist', type: 'checklist', columns: ['Done'], rows: ['Book a table'], x: 1200, y: 600 } },
       ],
       as: { name: 'JS' },
     }
@@ -82,7 +85,15 @@ try {
   await waitFor('awareness', () => [...b.provider.awareness.getStates().values()].some(s => s.user?.name === 'Ann JS'))
   out('awareness', b.provider.awareness.getStates().size)
   out('ready', true)
-  await waitFor('server ops', () => a.store.get('srv2') !== undefined && b.store.get('srv1')?.text === 'edited by js, then server', 10000)
+  await waitFor(
+    'server ops',
+    () =>
+      a.store.get('srv2') !== undefined &&
+      b.store.get('srv1')?.text === 'edited by js, then server' &&
+      Object.keys(a.store.get('jslist')?.picks ?? {}).length === 1 &&
+      Object.keys(a.store.get('srvlist')?.picks ?? {}).length === 3,
+    10000
+  )
   await new Promise(r => setTimeout(r, 200))
   out('read_final', read(a))
   a.provider.destroy()
@@ -130,7 +141,9 @@ async fn real_y_websocket_and_page_ops_interoperate() {
     ops(json!({ "as": { "name": "Server agent" }, "ops": [
         { "op": "add", "shape": { "id": "srv1", "type": "sticky", "text": "from server", "x": 400, "y": 0 } },
         { "op": "add", "shape": { "id": "srvlink", "type": "link", "url": "example.com/path", "x": 800, "y": 0 } },
-        { "op": "connect", "id": "srvarrow", "from": "srv1", "to": "srvlink", "fromSide": "right" }
+        { "op": "connect", "id": "srvarrow", "from": "srv1", "to": "srvlink", "fromSide": "right" },
+        { "op": "add", "shape": { "id": "srvlist", "type": "checklist", "title": "Dinner", "rows": ["Ann", "Bob", "Cy"],
+            "picks": { "Ann": "Yes" }, "x": 0, "y": -600 } }
     ]}))
     .await;
 
@@ -162,7 +175,9 @@ async fn real_y_websocket_and_page_ops_interoperate() {
         if k == "ready" {
             ops(json!({ "ops": [
                 { "op": "add", "shape": { "id": "srv2", "type": "text", "text": "late", "x": 0, "y": -300 } },
-                { "op": "update", "id": "srv1", "patch": { "text": "edited by js, then server" } }
+                { "op": "update", "id": "srv1", "patch": { "text": "edited by js, then server" } },
+                { "op": "update", "id": "jslist", "patch": { "picks": { "book a table": true } } },
+                { "op": "update", "id": "srvlist", "patch": { "picks": { "Dee": "maybe" } } }
             ]}))
             .await;
         }
@@ -180,8 +195,8 @@ async fn real_y_websocket_and_page_ops_interoperate() {
 
     // The page saw the server-made shapes exactly as the server reads them.
     let initial = &got["read_initial"];
-    assert_eq!(shapes_of(initial).len(), 3, "{initial}");
-    assert_eq!(got["apply"]["applied"], 4, "{}", got["apply"]);
+    assert_eq!(shapes_of(initial).len(), 4, "{initial}");
+    assert_eq!(got["apply"]["applied"], 6, "{}", got["apply"]);
     assert!(got["awareness"].as_u64().unwrap() >= 2);
 
     // Server and page agree on the final document, shape for shape.
@@ -202,4 +217,20 @@ async fn real_y_websocket_and_page_ops_interoperate() {
     let js1 = ss.iter().find(|s| s["id"] == "js1").unwrap();
     assert_eq!(js1["by"], "JS");
     assert_eq!(js1["frame"], "jsframe");
+    // Checklists: picks made on both sides, read the same by both.
+    let srvlist = ss.iter().find(|s| s["id"] == "srvlist").unwrap();
+    let picked: Vec<&Value> = srvlist["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| &r["pick"])
+        .collect();
+    assert_eq!(
+        picked,
+        [&json!("Yes"), &json!("No"), &Value::Null, &json!("Maybe")]
+    );
+    assert_eq!(srvlist["tally"], json!({ "Yes": 1, "No": 1, "Maybe": 1 }));
+    let jslist = ss.iter().find(|s| s["id"] == "jslist").unwrap();
+    assert_eq!(jslist["rows"][0]["pick"], "Done");
+    assert_eq!(jslist["rows"][0]["by"], "ann");
 }

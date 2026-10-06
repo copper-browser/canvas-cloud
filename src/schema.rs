@@ -20,7 +20,15 @@ pub const AGENTS: &str = "agents";
 pub const META: &str = "meta";
 
 /// Every shape type the schema knows.
-pub const SHAPE_TYPES: [&str; 6] = ["sticky", "text", "frame", "arrow", "image", "link"];
+pub const SHAPE_TYPES: [&str; 7] = [
+    "sticky",
+    "text",
+    "frame",
+    "arrow",
+    "image",
+    "link",
+    "checklist",
+];
 
 /// A shape type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +39,8 @@ pub enum ShapeType {
     Arrow,
     Image,
     Link,
+    /// A clickable RSVP / to-do card (`crate::checklist`).
+    Checklist,
 }
 
 impl ShapeType {
@@ -42,6 +52,7 @@ impl ShapeType {
             "arrow" => Self::Arrow,
             "image" => Self::Image,
             "link" => Self::Link,
+            "checklist" => Self::Checklist,
             _ => return None,
         })
     }
@@ -54,6 +65,7 @@ impl ShapeType {
             Self::Arrow => "arrow",
             Self::Image => "image",
             Self::Link => "link",
+            Self::Checklist => "checklist",
         }
     }
 
@@ -66,6 +78,7 @@ impl ShapeType {
             Self::Arrow => (0.0, 0.0),
             Self::Image => (320.0, 240.0),
             Self::Link => (300.0, 84.0),
+            Self::Checklist => (324.0, 120.0),
         }
     }
 
@@ -77,6 +90,7 @@ impl ShapeType {
             Self::Frame => Some((160.0, 120.0)),
             Self::Image => Some((32.0, 32.0)),
             Self::Link => Some((180.0, 56.0)),
+            Self::Checklist => Some((200.0, 72.0)),
             Self::Arrow => None,
         }
     }
@@ -86,6 +100,7 @@ impl ShapeType {
             Self::Sticky => "yellow",
             Self::Image | Self::Link => "white",
             Self::Text | Self::Frame | Self::Arrow => "gray",
+            Self::Checklist => "green",
         }
     }
 
@@ -107,13 +122,16 @@ impl ShapeType {
                 "x", "y", "w", "h", "color", "z", "src", "naturalW", "naturalH",
             ],
             Self::Link => &["x", "y", "w", "h", "color", "z", "url", "title", "favicon"],
+            Self::Checklist => &[
+                "x", "y", "w", "h", "color", "z", "title", "columns", "rows", "picks",
+            ],
         }
     }
 
     /// Friendly spellings: `text` on a frame or link is its title, on an arrow its label.
     pub fn alias(self, key: &str) -> &str {
         match (self, key) {
-            (Self::Frame | Self::Link, "text" | "label") => "title",
+            (Self::Frame | Self::Link | Self::Checklist, "text" | "label") => "title",
             (Self::Arrow, "text" | "title") => "label",
             (Self::Sticky | Self::Text, "title") => "text",
             _ => key,

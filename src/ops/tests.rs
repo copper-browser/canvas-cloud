@@ -7,6 +7,7 @@ use yrs::{Doc, GetString, ReadTxn, Transact};
 fn ctx() -> OpsCtx {
     OpsCtx {
         by: "tester".into(),
+        by_id: "u-tester".into(),
         now_ms: 1_000,
         confirm_clear: false,
         origin: Point { x: 0.0, y: 0.0 },
@@ -544,4 +545,246 @@ fn url_and_src_validation() {
     assert!(valid_image_src(&json!(huge))
         .unwrap_err()
         .contains("over 2 MB"));
+}
+
+// ---- checklist (the page's Canvas/src/__tests__/checklist-ops.test.ts) --------------------
+
+fn read_one(doc: &Doc, id: &str) -> Value {
+    let txn = doc.transact();
+    let out = crate::read::read_canvas_txn(&txn, &crate::read::ReadOpts::default());
+    let shape = out
+        .shapes
+        .into_iter()
+        .find(|s| s.id == id)
+        .expect("shape in the read");
+    serde_json::to_value(shape).unwrap()
+}
+
+fn picks(v: &Value) -> Vec<Value> {
+    v["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["pick"].clone())
+        .collect()
+}
+
+fn pick_keys(doc: &Doc, id: &str) -> usize {
+    shape(doc, id)
+        .as_object()
+        .unwrap()
+        .keys()
+        .filter(|k| k.starts_with("pick:"))
+        .count()
+}
+
+#[test]
+fn checklist_add_with_defaults_rows_picks_and_size() {
+    let doc = Doc::new();
+    let r = run(
+        &doc,
+        json!([{ "op": "add", "shape": { "type": "checklist", "id": "tue", "x": 0, "y": 0, "title": "Tue",
+            "rows": ["Ann", "Bob", { "label": "Cy", "id": "cy" }], "picks": { "Ann": "yes", "cy": "No" } } }]),
+    );
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+    let s = shape(&doc, "tue");
+    assert_eq!(s["type"], "checklist");
+    assert_eq!(s["title"], "Tue");
+    assert_eq!(s["columns"], json!(["Yes", "No"]));
+    assert_eq!(s["color"], "green");
+    assert_eq!(s["w"], 324);
+    assert_eq!(s["h"], 49 + 28 + 34 * 3 + 14);
+    assert_eq!(s["by"], "tester");
+    assert_eq!(s["rows"][2], json!({ "id": "cy", "label": "Cy" }));
+    assert_eq!(
+        s["pick:cy"],
+        json!({ "col": "No", "by": "tester", "byId": "u-tester", "at": 1000 })
+    );
+    let read = read_one(&doc, "tue");
+    assert_eq!(picks(&read), [json!("Yes"), Value::Null, json!("No")]);
+    assert_eq!(read["tally"], json!({ "Yes": 1, "No": 1 }));
+    assert_eq!(read["rows"][0]["by"], "tester");
+    assert_eq!(read["rows"][0]["at"], 1000);
+    assert_eq!(
+        read["rows"][1],
+        json!({ "id": read["rows"][1]["id"], "label": "Bob", "pick": null })
+    );
+    assert!(read.get("picks").is_none());
+}
+
+#[test]
+fn checklist_one_column_is_a_todo_list() {
+    let doc = Doc::new();
+    run(
+        &doc,
+        json!([{ "op": "add", "shape": { "type": "checklist", "id": "todo", "columns": ["Done"],
+            "rows": ["Book table"], "picks": { "book table": true } } }]),
+    );
+    let s = shape(&doc, "todo");
+    assert_eq!(s["w"], 280);
+    assert_eq!(s["h"], 49 + 34 + 14);
+    let read = read_one(&doc, "todo");
+    assert_eq!(read["rows"][0]["pick"], "Done");
+    assert_eq!(read["tally"], json!({ "Done": 1 }));
+}
+
+#[test]
+fn checklist_bad_input_fails_the_whole_add() {
+    let doc = Doc::new();
+    let r = run(
+        &doc,
+        json!([
+            { "op": "add", "shape": { "type": "checklist", "rows": ["Ann"], "picks": { "Ann": "Maybe" } } },
+            { "op": "add", "shape": { "type": "checklist", "columns": ["A", "B", "C", "D", "E"] } },
+            { "op": "add", "shape": { "type": "checklist", "rows": "Ann" } },
+            { "op": "add", "shape": { "type": "checklist", "rows": ["Ann"], "fontSize": 20 } }
+        ]),
+    );
+    assert_eq!(r.applied, 0);
+    let at: Vec<i64> = r.errors.iter().map(|e| e.index).collect();
+    assert_eq!(at, [0, 1, 2, 3]);
+    assert_eq!(r.errors[0].error, "`picks`: no column \"Maybe\" (Yes, No)");
+    assert!(
+        r.errors[3].error.contains("unknown prop `fontSize`"),
+        "{}",
+        r.errors[3].error
+    );
+    assert_eq!(count(&doc), 0);
+}
+
+#[test]
+fn checklist_update_picks_one_row_at_a_time() {
+    let doc = Doc::new();
+    run(
+        &doc,
+        json!([{ "op": "add", "shape": { "type": "checklist", "id": "c", "rows": ["Ann", "Bob", "Cy"],
+            "picks": { "Ann": "Yes", "Bob": "No" } } }]),
+    );
+    let r = run(
+        &doc,
+        json!([{ "op": "update", "id": "c", "patch": { "picks": { "Ann": null, "Cy": "yes" } } }]),
+    );
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+    let read = read_one(&doc, "c");
+    assert_eq!(picks(&read), [Value::Null, json!("No"), json!("Yes")]);
+    assert_eq!(read["tally"], json!({ "Yes": 1, "No": 1 }));
+    assert_eq!(pick_keys(&doc, "c"), 2);
+}
+
+#[test]
+fn checklist_rows_keep_their_picks_and_columns_drop_theirs() {
+    let doc = Doc::new();
+    run(
+        &doc,
+        json!([{ "op": "add", "shape": { "type": "checklist", "id": "c", "rows": ["Ann", "Bob"],
+            "picks": { "Ann": "Yes", "Bob": "No" } } }]),
+    );
+    let ann = shape(&doc, "c")["rows"][0]["id"].clone();
+    run(
+        &doc,
+        json!([{ "op": "update", "id": "c", "patch": { "rows": ["Bob", "Dee", "Ann"],
+            "columns": ["Yes", "No", "Maybe"], "picks": { "Dee": "maybe" } } }]),
+    );
+    let s = shape(&doc, "c");
+    assert_eq!(s["rows"][2]["id"], ann);
+    assert_eq!(s["columns"], json!(["Yes", "No", "Maybe"]));
+    assert_eq!(s["w"], 14 * 2 + 168 + 64 * 3);
+    assert_eq!(s["h"], 49 + 28 + 34 * 3 + 14);
+    assert_eq!(
+        picks(&read_one(&doc, "c")),
+        [json!("No"), json!("Maybe"), json!("Yes")]
+    );
+    run(
+        &doc,
+        json!([{ "op": "update", "id": "c", "patch": { "columns": ["Yes", "Maybe"], "rows": ["Bob", "Dee"] } }]),
+    );
+    assert_eq!(picks(&read_one(&doc, "c")), [Value::Null, json!("Maybe")]);
+    assert_eq!(pick_keys(&doc, "c"), 1);
+    // A column renamed only in case keeps its picks, under the new spelling.
+    run(
+        &doc,
+        json!([{ "op": "update", "id": "c", "patch": { "columns": ["Yes", "MAYBE"] } }]),
+    );
+    assert_eq!(picks(&read_one(&doc, "c")), [Value::Null, json!("MAYBE")]);
+}
+
+#[test]
+fn checklist_update_errors_change_nothing() {
+    let doc = Doc::new();
+    run(
+        &doc,
+        json!([{ "op": "add", "shape": { "type": "checklist", "id": "c", "title": "T", "rows": ["Ann"] } }]),
+    );
+    let r = run(
+        &doc,
+        json!([{ "op": "update", "id": "c", "patch": { "title": "New", "picks": { "Zed": "Yes" } } }]),
+    );
+    assert_eq!(r.errors[0].error, "`picks`: no row \"Zed\"");
+    assert_eq!(shape(&doc, "c")["title"], "T");
+}
+
+#[test]
+fn checklist_moves_resizes_with_a_floor_and_takes_text_as_title() {
+    let doc = Doc::new();
+    run(
+        &doc,
+        json!([
+            { "op": "add", "shape": { "type": "checklist", "id": "c", "x": 0, "y": 0, "rows": ["Ann"] } },
+            { "op": "move", "id": "c", "dx": 10, "dy": 20 },
+            { "op": "resize", "id": "c", "w": 50, "h": 50 },
+            { "op": "add", "shape": { "type": "checklist", "id": "d", "text": "Wed dinner" } }
+        ]),
+    );
+    let s = shape(&doc, "c");
+    assert_eq!(
+        (
+            s["x"].clone(),
+            s["y"].clone(),
+            s["w"].clone(),
+            s["h"].clone()
+        ),
+        (json!(10), json!(20), json!(200), json!(72))
+    );
+    assert_eq!(shape(&doc, "d")["title"], "Wed dinner");
+    assert_eq!(read_one(&doc, "d")["columns"], json!(["Yes", "No"]));
+}
+
+#[test]
+fn checklist_concurrent_picks_on_different_rows_both_stick() {
+    let a = Doc::with_client_id(1);
+    run(
+        &a,
+        json!([{ "op": "add", "shape": { "type": "checklist", "id": "c", "rows": [{"label": "Ann", "id": "ann"}, {"label": "Bob", "id": "bob"}] } }]),
+    );
+    let b = Doc::with_client_id(2);
+    let full = a
+        .transact()
+        .encode_state_as_update_v1(&yrs::StateVector::default());
+    b.transact_mut()
+        .apply_update(yrs::Update::decode_v1(&full).unwrap())
+        .unwrap();
+    // Both write before either hears from the other.
+    run(
+        &a,
+        json!([{ "op": "update", "id": "c", "patch": { "picks": { "ann": "Yes" } } }]),
+    );
+    run(
+        &b,
+        json!([{ "op": "update", "id": "c", "patch": { "picks": { "bob": "No" } } }]),
+    );
+    let ua = a
+        .transact()
+        .encode_state_as_update_v1(&b.transact().state_vector());
+    let ub = b
+        .transact()
+        .encode_state_as_update_v1(&a.transact().state_vector());
+    a.transact_mut()
+        .apply_update(yrs::Update::decode_v1(&ub).unwrap())
+        .unwrap();
+    b.transact_mut()
+        .apply_update(yrs::Update::decode_v1(&ua).unwrap())
+        .unwrap();
+    for d in [&a, &b] {
+        assert_eq!(picks(&read_one(d, "c")), [json!("Yes"), json!("No")]);
+    }
 }

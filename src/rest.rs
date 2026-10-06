@@ -28,11 +28,12 @@ use uuid::Uuid;
 use yrs::updates::decoder::Decode as _;
 use yrs::{Doc, Map as _, ReadTxn as _, StateVector, Transact as _, WriteTxn as _};
 
+use crate::chat::{read_chat, ReadWithChat, READ_CHAT_LIMIT};
 use crate::geometry::Point;
 use crate::ops::{
     apply_json_ops, read_agent, write_agent, Actor, AgentPatch, OpsCtx, OpsResult, WRITING_MS,
 };
-use crate::read::{read_canvas_txn, CanvasRef, ReadOpts, ReadResult};
+use crate::read::{read_canvas_txn, CanvasRef, ReadOpts};
 use crate::room::{rooms, SERVER_ORIGIN};
 use crate::schema::{out_to_json, AGENTS, META, SHAPES};
 use crate::store;
@@ -1241,7 +1242,7 @@ pub(crate) async fn read_canvas(
     user: AuthUser,
     Path(raw): Path<String>,
     Query(q): Query<ReadQuery>,
-) -> Result<Json<ReadResult>, ApiError> {
+) -> Result<Json<ReadWithChat>, ApiError> {
     let a = access(&state, user.user_id, &raw).await?;
     let room = rooms().get(a.canvas_id);
     let g = room.read(&state).await?;
@@ -1251,13 +1252,16 @@ pub(crate) async fn read_canvas(
         types: csv(q.types.as_deref()),
         now_ms: 0,
     };
-    let mut out = read_canvas_txn(&g.doc().transact(), &opts);
+    let txn = g.doc().transact();
+    let mut out = read_canvas_txn(&txn, &opts);
     out.canvas = Some(CanvasRef {
         id: a.canvas_id.to_string(),
         name: a.name,
         kind: a.kind,
     });
-    Ok(Json(out))
+    // The most recent chat messages (0.6.0), so agents can read the conversation too.
+    let chat = read_chat(&txn, READ_CHAT_LIMIT, q.full);
+    Ok(Json(ReadWithChat { read: out, chat }))
 }
 
 /// `POST /canvases/:id/ops` — `{ops:[…], as?:{id,name,color}|"name", confirm?, near?:{x,y}}`
@@ -1304,6 +1308,10 @@ pub(crate) async fn post_ops(
         None => display_name(&state, &user).await?,
     };
     let mut ctx = OpsCtx::new(by);
+    // Checklist picks say who made them: the agent named in `as`, else the caller.
+    ctx.by_id = actor
+        .as_ref()
+        .map_or_else(|| user.user_id.to_string(), |a| a.id.clone());
     ctx.confirm_clear = confirm;
     if let Some(p) = near {
         ctx.origin = p;

@@ -11,6 +11,10 @@
 //! {op:"clear", confirm:true}                                 // server: needs confirmation
 //! ```
 //!
+//! A checklist (`crate::checklist`) takes `title`, `columns` (1–4, default Yes/No), `rows`
+//! (labels or `{label, id?}`, ≤ 60) and `picks` (`{rowIdOrLabel: column | true | null}`)
+//! on add and update; `rows` and `columns` replace the lists.
+//!
 //! A failing op changes nothing and is reported in `errors`; the rest still apply.
 //! `ids[i]` is the id op `i` created or touched (`null` when it failed, and for `clear`).
 //!
@@ -20,6 +24,10 @@ use serde::Serialize;
 use serde_json::{json, Map as JsonMap, Value};
 use yrs::{Any, GetString, Map, MapPrelim, MapRef, Out, Text, TextPrelim, TextRef, TransactionMut};
 
+use crate::checklist::{
+    checklist_height, checklist_width, clean_columns, clean_picks, clean_rows, write_checklist,
+    ChecklistInput, Picker, Row, DEFAULT_COLUMNS,
+};
 use crate::geometry::{center, contains_box, find_free_spot, js_round, BoxF, Point, Side};
 use crate::schema::{
     color_for, is_valid_color, jnum, js_len, js_slice, json_f64, json_to_any, ShapeType,
@@ -175,6 +183,8 @@ impl Op {
 pub struct OpsCtx {
     /// Written to `by` on every shape the batch creates.
     pub by: String,
+    /// The writer's id, on the checklist picks the batch makes (`byId`).
+    pub by_id: String,
     /// Written to `createdAt`/`updatedAt` (ms since the Unix epoch).
     pub now_ms: i64,
     /// `confirm: true` was given at request level, which unlocks `clear`.
@@ -188,6 +198,7 @@ impl OpsCtx {
     pub fn new(by: impl Into<String>) -> Self {
         Self {
             by: by.into(),
+            by_id: "agent".into(),
             now_ms: crate::schema::now_ms(),
             confirm_clear: false,
             origin: Point { x: 0.0, y: 0.0 },
@@ -529,6 +540,7 @@ fn clean_props(
                 }
                 value.clone()
             }
+            "columns" | "rows" => clean_checklist_list(key, value, txn, shapes, self_id)?,
             "from" | "to" => {
                 let end = Endpoint::read(value).ok_or_else(|| {
                     format!("`{key}` must be a shape id, {{ref, side?}} or {{x, y}}")
@@ -541,6 +553,30 @@ fn clean_props(
         out.insert(key.to_owned(), cleaned);
     }
     Ok(out)
+}
+
+/// A checklist's `columns` or `rows`, cleaned (rows keep the ids of `self_id`'s rows).
+fn clean_checklist_list(
+    key: &str,
+    value: &Value,
+    txn: &TransactionMut,
+    shapes: &MapRef,
+    self_id: Option<&str>,
+) -> Result<Value, String> {
+    if key == "columns" {
+        return Ok(json!(clean_columns(value)?));
+    }
+    let existing = self_id
+        .and_then(|id| live_shape(txn, shapes, id))
+        .and_then(|s| s.checklist)
+        .map(|c| c.rows)
+        .unwrap_or_default();
+    Ok(Value::Array(
+        clean_rows(value, &existing)?
+            .iter()
+            .map(Row::to_json)
+            .collect(),
+    ))
 }
 
 fn clean_image(value: &Value) -> Result<Value, String> {
@@ -810,6 +846,37 @@ fn type_defaults(kind: ShapeType, props: &mut JsonMap<String, Value>) -> Result<
                 }
             }
         }
+        ShapeType::Checklist => {
+            let input = ChecklistInput::take(props);
+            let columns = input
+                .columns
+                .unwrap_or_else(|| DEFAULT_COLUMNS.iter().map(|c| (*c).to_owned()).collect());
+            let rows = input.rows.unwrap_or_default();
+            if !props.contains_key("title") {
+                props.insert("title".into(), "".into());
+            }
+            // Checked before anything is written: a bad pick fails the whole add.
+            if let Some(p) = &input.picks {
+                clean_picks(p, &rows, &columns)?;
+            }
+            if !props.contains_key("w") {
+                props.insert("w".into(), checklist_width(columns.len()).into());
+            }
+            if !props.contains_key("h") {
+                props.insert(
+                    "h".into(),
+                    checklist_height(columns.len(), rows.len()).into(),
+                );
+            }
+            props.insert("columns".into(), json!(columns));
+            props.insert(
+                "rows".into(),
+                Value::Array(rows.iter().map(Row::to_json).collect()),
+            );
+            if let Some(p) = input.picks {
+                props.insert("picks".into(), p);
+            }
+        }
         ShapeType::Link => {
             let Some(u) = props.get("url").and_then(Value::as_str).map(str::to_owned) else {
                 return Err("a link needs `url`".into());
@@ -838,7 +905,7 @@ fn op_add(
         .get("type")
         .and_then(Value::as_str)
         .and_then(ShapeType::parse)
-        .ok_or("`shape.type` must be sticky, text, frame, arrow, image or link")?;
+        .ok_or("`shape.type` must be sticky, text, frame, arrow, image, link or checklist")?;
     let id = match raw.get("id") {
         None => None,
         Some(Value::String(s)) if valid_shape_id(s) => {
@@ -893,7 +960,17 @@ fn op_add(
             props.insert("y".into(), spot.y.into());
         }
     }
+    let picks = props.remove("picks");
     create(txn, shapes, kind, &id, &props, ctx);
+    if let (ShapeType::Checklist, Some(picks)) = (kind, picks) {
+        if let Some(m) = shape_map(txn, shapes, &id) {
+            let input = ChecklistInput {
+                picks: Some(picks),
+                ..ChecklistInput::default()
+            };
+            write_checklist(txn, &m, &input, &picker(ctx), true, true)?;
+        }
+    }
     let b = BoxF {
         x: num(&props, "x").unwrap_or(0.0),
         y: num(&props, "y").unwrap_or(0.0),
@@ -931,8 +1008,32 @@ fn op_update(
         }
     }
     let m = shape_map(txn, shapes, &shape.id).ok_or_else(|| format!("no shape {id}"))?;
+    if shape.kind == ShapeType::Checklist {
+        let input = ChecklistInput::take(&mut props);
+        if let Some(p) = &input.picks {
+            let live = shape.checklist.clone().unwrap_or_default();
+            clean_picks(
+                p,
+                input.rows.as_deref().unwrap_or(&live.rows),
+                input.columns.as_deref().unwrap_or(&live.columns),
+            )?;
+        }
+        let sized = (props.contains_key("w"), props.contains_key("h"));
+        store_update(txn, &m, shape.kind, &props, ctx);
+        write_checklist(txn, &m, &input, &picker(ctx), sized.0, sized.1)?;
+        return Ok(shape.id);
+    }
     store_update(txn, &m, shape.kind, &props, ctx);
     Ok(shape.id)
+}
+
+/// Who a checklist pick made by this batch is attributed to.
+fn picker(ctx: &OpsCtx) -> Picker<'_> {
+    Picker {
+        name: &ctx.by,
+        id: &ctx.by_id,
+        at: ctx.now_ms,
+    }
 }
 
 fn op_move(

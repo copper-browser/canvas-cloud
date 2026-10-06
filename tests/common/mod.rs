@@ -1,6 +1,7 @@
-//! Shared integration-test harness: real Postgres (`copper_cloud_test_canvas`), the real
-//! core app + canvas router on an ephemeral port, users/sessions inserted directly, and a
-//! minimal y-websocket client built on `yrs` + tokio-tungstenite.
+//! Shared integration-test harness: real Postgres (`COPPER_CLOUD_TEST_CANVAS_DATABASE_URL`,
+//! default `postgres://localhost:5432/copper_cloud_test_canvas`), the real core app + canvas
+//! router on an ephemeral port, users/sessions inserted directly, and a minimal y-websocket
+//! client built on `yrs` + tokio-tungstenite.
 
 #![allow(dead_code, clippy::missing_panics_doc)]
 
@@ -39,6 +40,13 @@ use yrs::{
 };
 
 pub const DATABASE_URL: &str = "postgres://localhost:5432/copper_cloud_test_canvas";
+
+/// The test database: `COPPER_CLOUD_TEST_CANVAS_DATABASE_URL`, else [`DATABASE_URL`] — so
+/// parallel checkouts can each test against their own database.
+pub fn database_url() -> String {
+    std::env::var("COPPER_CLOUD_TEST_CANVAS_DATABASE_URL")
+        .unwrap_or_else(|_| DATABASE_URL.to_owned())
+}
 
 static MIGRATED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
 
@@ -79,14 +87,23 @@ pub struct User {
 
 impl TestApp {
     pub async fn new() -> Self {
+        Self::with_config(Config::for_tests(&database_url())).await
+    }
+
+    /// A second server over the same database and config (same master key): what a restart
+    /// of this one sees. Rooms are process-wide, so evict them first for a cold start.
+    pub async fn restart(&self) -> Self {
+        Self::with_config(Config::clone(&self.state.cfg)).await
+    }
+
+    async fn with_config(cfg: Config) -> Self {
         let pool = PgPoolOptions::new()
             .max_connections(4)
             .acquire_timeout(Duration::from_secs(30))
-            .connect(DATABASE_URL)
+            .connect(&cfg.database_url)
             .await
-            .expect("connecting to copper_cloud_test_canvas");
+            .expect("connecting to the canvas test database (createdb copper_cloud_test_canvas)");
         migrate(&pool).await;
-        let cfg = Config::for_tests(DATABASE_URL);
         let instance_key = cfg.instance_key.clone();
         let state = AppState::new(pool, cfg);
         let router = copper_cloud_core::app_with(

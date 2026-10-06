@@ -4,6 +4,7 @@
 use serde_json::{json, Value};
 use yrs::{Any, Map, MapRef, Out, ReadTxn};
 
+use crate::checklist::{read_checklist, Checklist};
 use crate::geometry::{arrow_box, arrow_path, js_round, BoxF, End, Point, Side};
 use crate::schema::{
     is_valid_color, jnum, json_f64, out_f64, out_string, out_to_json, ShapeType, SHAPES,
@@ -122,6 +123,8 @@ pub struct Shape {
     pub natural_w: f64,
     pub natural_h: f64,
     pub url: String,
+    /// A checklist's columns, rows and picks (`None` for other types).
+    pub checklist: Option<Checklist>,
 }
 
 impl Shape {
@@ -199,6 +202,7 @@ pub fn read_shape<T: ReadTxn>(txn: &T, id: &str, out: &Out) -> Option<Shape> {
         natural_w: num("naturalW").unwrap_or(w),
         natural_h: num("naturalH").unwrap_or(h),
         url: s("url").unwrap_or_default(),
+        checklist: is(ShapeType::Checklist).then(|| read_checklist(&json)),
         kind,
     })
 }

@@ -5,6 +5,8 @@
 //! * [`ops`] / [`read`] — the spec §4 canvas ops and read format over a `yrs` document.
 //! * [`rooms_metrics`] — live room / peer counts.
 //! * [`admin`] — instance-admin operations (delete any canvas, disconnect a user).
+//! * [`chat`] / [`mentions`] — the document's `chat` array as `/read` shows it, and chat
+//!   @mention notifications (0.6.0).
 //!
 //! See `docs/canvas.md` and `docs/canvas-protocol.md`.
 
@@ -14,7 +16,10 @@ use axum::Router;
 use copper_cloud_core::state::SharedState;
 
 pub mod admin;
+pub mod chat;
+pub mod checklist;
 pub mod geometry;
+pub mod mentions;
 pub mod ops;
 pub mod read;
 mod rest;
@@ -58,6 +63,9 @@ pub const MAX_OPS_BODY_BYTES: usize = 4 << 20;
 /// | GET (upgrade) | `/canvases/{id}/ws` (WebSocket; HTTP/2 CONNECT too) |
 /// | GET | `/canvases/{id}/state`, `/canvases/{id}/read` |
 /// | POST | `/canvases/{id}/ops` |
+/// | POST | `/canvases/{id}/mentions` |
+/// | GET | `/mentions` |
+/// | POST | `/mentions/read` |
 pub fn router() -> Router<SharedState> {
     Router::new()
         .route(
@@ -107,6 +115,9 @@ pub fn router() -> Router<SharedState> {
             "/canvases/{id}/ops",
             post(rest::post_ops).layer(DefaultBodyLimit::max(MAX_OPS_BODY_BYTES)),
         )
+        .route("/canvases/{id}/mentions", post(mentions::post_mentions))
+        .route("/mentions", get(mentions::list_mentions))
+        .route("/mentions/read", post(mentions::mark_read))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
 }
 
