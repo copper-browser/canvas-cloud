@@ -4,7 +4,12 @@ description = "Canvases REST API and Yjs WebSocket rooms for copper-cloud"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+authors.workspace = true
 rust-version.workspace = true
+publish = false
 
 [lints]
 workspace = true
