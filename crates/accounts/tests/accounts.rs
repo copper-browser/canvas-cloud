@@ -366,6 +366,12 @@ async fn token_limit() {
     assert_eq!(s, StatusCode::CREATED);
 }
 
+/// The SSE id of core event `n`, given a `ready` frame's id sent when core's last id was
+/// `at` (ids are `base + n`).
+fn wire_from(ready_id: &str, at: u64, n: u64) -> String {
+    (ready_id.parse::<u64>().unwrap() - at + n).to_string()
+}
+
 fn canvas_event(kind: &str) -> Event {
     Event::Canvas {
         canvas_id: Uuid::nil(),
@@ -385,8 +391,12 @@ async fn events_stream_live_with_ids_and_only_the_callers() {
     assert_eq!(sse.headers["cache-control"], "no-cache");
     let ready = sse.next(WAIT).await.expect("ready");
     assert_eq!(ready.event, "ready");
-    let start: u64 = ready.id.clone().unwrap().parse().unwrap();
+    let ready_id = ready.id.clone().unwrap();
+    let start: u64 = ready_id.parse().unwrap();
+    assert!(start > 1_700_000_000_000_000 && start < 1 << 53, "microsecond base: {start}");
     assert_eq!(ready.json()["last_event_id"], json!(start));
+    let at = app.state.events.last_id();
+    let wire = |n: u64| wire_from(&ready_id, at, n);
     assert_eq!(ready.json()["user_id"], json!(hal.id));
 
     // Ivy's events never reach Hal; Hal's REST actions do, with increasing ids and the
@@ -421,7 +431,7 @@ async fn events_stream_live_with_ids_and_only_the_callers() {
     let n = app.state.events.publish(hal.id, canvas_event("renamed"));
     for s in [&mut sse, &mut by_query, &mut by_app] {
         let f = s.until("canvas", WAIT).await.unwrap();
-        assert_eq!(f.id, Some(n.to_string()));
+        assert_eq!(f.id, Some(wire(n)));
         assert_eq!(f.json()["kind"], "renamed");
     }
 
@@ -439,22 +449,26 @@ async fn events_resume_from_last_event_id_or_resync() {
     let kim = app.user("kim").await;
     let ev = &app.state.events;
 
+    let first = app.events(&jo.token, &[]).await.next(WAIT).await.unwrap();
+    let (r, at) = (first.id.unwrap(), ev.last_id());
+    let wire = |n: u64| wire_from(&r, at, n);
     let a = ev.publish(jo.id, canvas_event("a"));
     ev.publish(kim.id, canvas_event("other"));
     let b = ev.publish(jo.id, canvas_event("b"));
     let c = ev.publish(jo.id, canvas_event("c"));
 
     // Resume after `a`: replays b, c (not Kim's), then ready at the newest id.
-    let mut sse = app.events(&jo.token, &[("last-event-id", &a.to_string())]).await;
+    let mut sse = app.events(&jo.token, &[("last-event-id", &wire(a))]).await;
     let f1 = sse.next(WAIT).await.unwrap();
     let f2 = sse.next(WAIT).await.unwrap();
-    assert_eq!((f1.event.as_str(), f1.id.as_deref()), ("canvas", Some(b.to_string().as_str())));
+    assert_eq!((f1.event.as_str(), f1.id.clone()), ("canvas", Some(wire(b))));
     assert_eq!(f1.json()["kind"], "b");
-    assert_eq!(f2.id, Some(c.to_string()));
+    assert_eq!(f2.id, Some(wire(c)));
     let ready = sse.next(WAIT).await.unwrap();
-    assert_eq!((ready.event.as_str(), ready.id.clone()), ("ready", Some(c.to_string())));
+    assert_eq!((ready.event.as_str(), ready.id.clone()), ("ready", Some(wire(c))));
     let d = ev.publish(jo.id, canvas_event("d"));
-    assert_eq!(sse.next(WAIT).await.unwrap().id, Some(d.to_string()));
+    assert_eq!(sse.next(WAIT).await.unwrap().id, Some(wire(d)));
+    let d = wire(d);
 
     // Up to date: just ready. Via the query parameter too.
     let mut sse = common::Sse::open(
@@ -464,11 +478,14 @@ async fn events_resume_from_last_event_id_or_resync() {
     )
     .await;
     let f = sse.next(WAIT).await.unwrap();
-    assert_eq!((f.event.as_str(), f.id), ("ready", Some(d.to_string())));
+    assert_eq!((f.event.as_str(), f.id), ("ready", Some(d.clone())));
 
-    // An id this process never issued (e.g. from before a restart), garbage, or one that fell
-    // out of the ring buffer → resync, then ready.
-    for bad in ["999999999".to_owned(), "nope".to_owned()] {
+    // An id this process never issued, one from before a restart (another epoch, even with a
+    // core id that exists now), garbage, or one that fell out of the ring buffer → resync,
+    // then ready.
+    let base = r.parse::<u64>().unwrap() - at;
+    let restarted = (base - 1).to_string();
+    for bad in [wire(999_999_999), restarted, a.to_string(), "nope".to_owned()] {
         let mut sse = app.events(&jo.token, &[("last-event-id", &bad)]).await;
         let f = sse.next(WAIT).await.unwrap();
         assert_eq!(f.event, "resync", "{bad}");
@@ -478,11 +495,11 @@ async fn events_resume_from_last_event_id_or_resync() {
     for _ in 0..RING_CAPACITY {
         ev.publish(kim.id, canvas_event("flood"));
     }
-    let mut sse = app.events(&jo.token, &[("last-event-id", &a.to_string())]).await;
+    let mut sse = app.events(&jo.token, &[("last-event-id", &wire(a))]).await;
     assert_eq!(sse.next(WAIT).await.unwrap().event, "resync");
     let ready = sse.next(WAIT).await.unwrap();
     assert_eq!(ready.event, "ready");
-    assert_eq!(ready.id, Some(ev.last_id().to_string()));
+    assert_eq!(ready.id, Some(wire(ev.last_id())));
 }
 
 #[tokio::test]

@@ -1,6 +1,13 @@
 //! `GET /v1/events` — the caller's `canvas` events as Server-Sent Events, with `id:` lines and
 //! `Last-Event-ID` resume from core's ring buffer.
 //!
+//! Ids only increase, across restarts too: `base + n`, where `n` is core's per-process event id
+//! ([`Envelope::id`], restarting at 1 with the process) and `base` the time this server started
+//! in Unix microseconds. A later process's base is above every id an earlier one issued (unless
+//! it published more than a million events a second), so an id from before a restart never
+//! resumes into the new numbering; it gets a `resync` instead. Ids stay below 2^53, so
+//! JavaScript reads them exactly.
+//!
 //! Frames:
 //!
 //! * `event: canvas` / `id: <u64>` / `data: {"type":"canvas","canvas_id":…,"kind":…}` — the
@@ -16,12 +23,13 @@
 //! [`REVALIDATE_EVERY`]) or the server shuts down.
 
 use std::convert::Infallible;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::extract::State;
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::IntoResponse;
+use axum::Extension;
 use canvas_cloud_core::events::{Envelope, Events, Resume};
 use canvas_cloud_core::extract::QueryParams;
 use canvas_cloud_core::identity::{AuthUser, Via};
@@ -33,6 +41,8 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::broadcast::Receiver;
 use uuid::Uuid;
 
+use crate::SharedAccounts;
+
 /// Keepalive comment interval.
 pub const KEEPALIVE: Duration = Duration::from_secs(15);
 /// How often an open stream re-checks that its credential is still valid.
@@ -42,6 +52,23 @@ pub const REVALIDATE_EVERY: Duration = Duration::from_secs(60);
 pub(crate) struct EventsQuery {
     /// For clients that cannot set `Last-Event-ID` on the first connection.
     last_event_id: Option<String>,
+}
+
+/// This process's id base: the current Unix time in microseconds.
+pub(crate) fn id_base_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX / 2))
+}
+
+/// The SSE id of core event `n`.
+fn wire_id(base: u64, n: u64) -> u64 {
+    base.saturating_add(n)
+}
+
+/// Core's event id for an SSE id, `None` for one from before this process (below its base).
+fn local_id(base: u64, wire: u64) -> Option<u64> {
+    wire.checked_sub(base)
 }
 
 /// Buffered envelopes after `after`, the id they reach, and a tap receiver positioned right
@@ -66,10 +93,10 @@ fn subscribe_now(events: &Events) -> (Vec<Envelope>, u64, Receiver<Envelope>) {
     }
 }
 
-fn canvas_frame(env: &Envelope) -> SseEvent {
+fn canvas_frame(base: u64, env: &Envelope) -> SseEvent {
     SseEvent::default()
         .event(env.event.name())
-        .id(env.id.to_string())
+        .id(wire_id(base, env.id).to_string())
         .data(serde_json::to_string(&env.event).unwrap_or_default())
 }
 
@@ -106,14 +133,14 @@ struct StreamGauge;
 
 impl StreamGauge {
     fn new() -> Self {
-        metrics::gauge!("user_event_streams").increment(1.0);
+        metrics::gauge!("sse_subscribers", "stream" => "user").increment(1.0);
         Self
     }
 }
 
 impl Drop for StreamGauge {
     fn drop(&mut self) {
-        metrics::gauge!("user_event_streams").decrement(1.0);
+        metrics::gauge!("sse_subscribers", "stream" => "user").decrement(1.0);
     }
 }
 
@@ -144,18 +171,21 @@ fn requested_resume(headers: &HeaderMap, query: Option<&str>) -> ResumeFrom {
 
 fn event_stream(
     state: SharedState,
+    base: u64,
     user: AuthUser,
     resume: ResumeFrom,
 ) -> impl Stream<Item = Result<SseEvent, Infallible>> {
     let events = &state.events;
-    let (gap, (replay, reached, mut rx)) = match resume {
-        ResumeFrom::Now => (false, subscribe_now(events)),
-        ResumeFrom::After(after) => match subscribe_after(events, after) {
-            Some(s) => (false, s),
-            None => (true, subscribe_now(events)),
-        },
-        ResumeFrom::Invalid => (true, subscribe_now(events)),
+    let resumed = match resume {
+        ResumeFrom::Now => Some(subscribe_now(events)),
+        ResumeFrom::After(wire) => {
+            local_id(base, wire).and_then(|after| subscribe_after(events, after))
+        }
+        ResumeFrom::Invalid => None,
     };
+    let gap = resumed.is_none();
+    let (replay, reached, mut rx) = resumed.unwrap_or_else(|| subscribe_now(events));
+    let reached = wire_id(base, reached);
     let user_id: Uuid = user.user_id;
     let mut shutdown = canvas_cloud_core::shutdown::subscribe();
     async_stream::stream! {
@@ -164,7 +194,7 @@ fn event_stream(
             yield Ok(SseEvent::default().event("resync").data(json!({ "reason": "gap" }).to_string()));
         }
         for env in replay.iter().filter(|e| e.user_id == user_id) {
-            yield Ok(canvas_frame(env));
+            yield Ok(canvas_frame(base, env));
         }
         yield Ok(SseEvent::default()
             .event("ready")
@@ -178,7 +208,7 @@ fn event_stream(
                 msg = rx.recv() => match msg {
                     Ok(env) => {
                         if env.user_id == user_id {
-                            yield Ok(canvas_frame(&env));
+                            yield Ok(canvas_frame(base, &env));
                         }
                     }
                     Err(RecvError::Lagged(skipped)) => {
@@ -202,12 +232,13 @@ fn event_stream(
 /// `GET /v1/events` (any credential; `?token=` accepted with `Accept: text/event-stream`).
 pub(crate) async fn stream(
     State(state): State<SharedState>,
+    Extension(shared): Extension<SharedAccounts>,
     user: AuthUser,
     headers: HeaderMap,
     QueryParams(q): QueryParams<EventsQuery>,
 ) -> impl IntoResponse {
     let resume = requested_resume(&headers, q.last_event_id.as_deref());
-    let sse = Sse::new(event_stream(state, user, resume))
+    let sse = Sse::new(event_stream(state, shared.events_base, user, resume))
         .keep_alive(KeepAlive::new().interval(KEEPALIVE).text("keepalive"));
     (
         [
@@ -236,6 +267,18 @@ mod tests {
         assert_eq!(requested_resume(&h, Some("7")), ResumeFrom::After(12), "header wins");
         h.insert("last-event-id", HeaderValue::from_static("nope"));
         assert_eq!(requested_resume(&h, None), ResumeFrom::Invalid);
+    }
+
+    #[test]
+    fn wire_ids() {
+        let base = id_base_now();
+        assert!(base > 1_700_000_000_000_000 && base < (1 << 53), "{base}");
+        assert_eq!(wire_id(base, 7), base + 7);
+        assert_eq!(local_id(base, base + 7), Some(7));
+        assert_eq!(local_id(base, base), Some(0));
+        assert_eq!(local_id(base, base - 1), None, "an earlier process");
+        assert_eq!(local_id(base, 7), None, "a bare core id");
+        assert!(id_base_now() >= base);
     }
 
     #[test]

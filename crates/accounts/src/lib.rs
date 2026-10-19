@@ -45,17 +45,28 @@ pub const FEATURES: &[&str] = &["accounts", "access_tokens", "events", "oidc"];
 
 /// Per-router state the accounts handlers share (one instance per composed app, so tests
 /// with different configs in one process do not share buckets or caches).
-#[derive(Default)]
 pub(crate) struct Shared {
     pub(crate) limits: limits::EmailLimiter,
     pub(crate) oidc: oidc::Cache,
+    /// Offset of every `/v1/events` id (see [`events`]).
+    pub(crate) events_base: u64,
+}
+
+impl Shared {
+    fn new() -> Self {
+        Self {
+            limits: limits::EmailLimiter::default(),
+            oidc: oidc::Cache::default(),
+            events_base: events::id_base_now(),
+        }
+    }
 }
 
 pub(crate) type SharedAccounts = Arc<Shared>;
 
 /// Routes under `/v1` (paths relative to `/v1`). Mounted by `canvas_cloud::app`.
 pub fn router() -> Router<SharedState> {
-    let shared: SharedAccounts = Arc::new(Shared::default());
+    let shared: SharedAccounts = Arc::new(Shared::new());
     Router::new()
         .route("/auth/signup", post(auth::signup))
         .route("/auth/login", post(auth::login))
