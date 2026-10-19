@@ -12,12 +12,19 @@
 # PostgreSQL is the distribution's native package (never a container), unless DATABASE_URL
 # points at an existing server.
 #
-# Inputs (environment, all optional):
+# Inputs (environment, all optional; they shape the config of a fresh install only):
 #   DATABASE_URL                use this Postgres instead of installing one locally
 #   CANVAS_CLOUD_PUBLIC_HOST    host/IP clients connect to (default: detected public IP)
-#   CANVAS_CLOUD_PORT           HTTPS port (default 443)
-#   CANVAS_CLOUD_DOMAIN         use Let's Encrypt (ACME) for this domain instead of self-signed
+#   CANVAS_CLOUD_PORT           port to listen on, all interfaces (default 443)
+#   CANVAS_CLOUD_LISTEN         full listen address ip:port, e.g. 127.0.0.1:8480 (overrides
+#                               CANVAS_CLOUD_PORT)
+#   CANVAS_CLOUD_TLS_MODE       off | self-signed | acme (default: acme when CANVAS_CLOUD_DOMAIN
+#                               is set, else self-signed); off = plain HTTP behind a TLS proxy
+#   CANVAS_CLOUD_DOMAIN         public domain; with the default TLS mode it turns on Let's
+#                               Encrypt (ACME) for it
 #   CANVAS_CLOUD_ACME_EMAIL     contact email for ACME
+#   CANVAS_CLOUD_PUBLIC_URL     base URL clients use, e.g. https://canvas.example.com
+#                               (default: derived from the host, port and TLS mode)
 #   CANVAS_CLOUD_MASTER_KEY     master key, base64url 32 bytes (default: generated)
 #   CANVAS_CLOUD_BINARY         local path to the canvas-cloud binary or release .tar.gz
 #   CANVAS_CLOUD_BINARY_URL     URL of the binary or release .tar.gz
@@ -25,7 +32,8 @@
 #   GITHUB_TOKEN                token for downloading from a private GitHub repository
 #
 # Flags: --uninstall (remove service + binary, keep data), --purge (also delete config,
-#        state and the local canvas_cloud database), --print-unit, --help.
+#        state and the local canvas_cloud database), --dry-run (print the settings a
+#        fresh install would use and change nothing; no root needed), --print-unit, --help.
 
 set -eu
 
@@ -102,7 +110,8 @@ UNIT_EOF
 }
 
 usage() {
-	sed -n '2,28p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//' || true
+	# The comment block at the top of this file (empty when piped into sh).
+	awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0" 2>/dev/null || true
 }
 
 # Run canvas-cloud against the installed config with a clean environment, so installer
@@ -395,22 +404,104 @@ ensure_user() {
 	install -d -m 0750 -o root -g "$SVC_USER" "$ETC"
 }
 
+# Bracket an IPv6 literal for use in a URL.
+url_host() { case "$1" in *:*) echo "[$1]" ;; *) echo "$1" ;; esac; }
+
+# Resolve the settings of a fresh install from the inputs into LISTEN, LISTEN_HOST, PORT,
+# LOOPBACK (1/0), TLS_MODE, DOMAIN_ARG (passed as --domain; empty = none) and PUBLIC_URL.
+resolve_settings() {
+	PORT=${CANVAS_CLOUD_PORT:-443}
+	LISTEN=${CANVAS_CLOUD_LISTEN:-}
+	if [ -n "$LISTEN" ]; then
+		case "$LISTEN" in
+		*:*) ;;
+		*) die "CANVAS_CLOUD_LISTEN must be ip:port (e.g. 127.0.0.1:8480), got $LISTEN" ;;
+		esac
+		PORT=${LISTEN##*:}
+		if [ -n "${CANVAS_CLOUD_PORT:-}" ] && [ "$CANVAS_CLOUD_PORT" != "$PORT" ]; then
+			warn "CANVAS_CLOUD_PORT=$CANVAS_CLOUD_PORT ignored: CANVAS_CLOUD_LISTEN=$LISTEN sets the port"
+		fi
+	else
+		LISTEN="0.0.0.0:$PORT"
+	fi
+	case "$PORT" in
+	'' | *[!0-9]*) die "invalid port in listen address $LISTEN" ;;
+	esac
+	LISTEN_HOST=${LISTEN%:*}
+	case "$LISTEN_HOST" in
+	\[*\]) ;;
+	'' | *[!0-9.]*) die "the listen host must be an IP address (e.g. 127.0.0.1:8480 or [::1]:8480), got $LISTEN" ;;
+	esac
+	LOOPBACK=0
+	case "$LISTEN_HOST" in 127.* | "[::1]") LOOPBACK=1 ;; esac
+
+	TLS_MODE=${CANVAS_CLOUD_TLS_MODE:-}
+	case "$TLS_MODE" in
+	"") if [ -n "${CANVAS_CLOUD_DOMAIN:-}" ]; then TLS_MODE=acme; else TLS_MODE=self-signed; fi ;;
+	off | acme | self-signed) ;;
+	selfsigned | self_signed) TLS_MODE=self-signed ;;
+	*) die "CANVAS_CLOUD_TLS_MODE must be off, self-signed or acme (got $TLS_MODE)" ;;
+	esac
+	DOMAIN_ARG=""
+	case "$TLS_MODE" in
+	acme)
+		[ -n "${CANVAS_CLOUD_DOMAIN:-}" ] || die "CANVAS_CLOUD_TLS_MODE=acme needs CANVAS_CLOUD_DOMAIN"
+		[ "$PORT" = 443 ] || warn "ACME (TLS-ALPN-01) needs this server reachable on port 443 from the internet"
+		[ "$LOOPBACK" = 0 ] || warn "ACME cannot complete on a loopback-only listener ($LISTEN)"
+		DOMAIN_ARG=$CANVAS_CLOUD_DOMAIN
+		;;
+	self-signed) DOMAIN_ARG=${CANVAS_CLOUD_DOMAIN:-} ;;
+	off)
+		[ "$LOOPBACK" = 1 ] ||
+			warn "TLS is off on $LISTEN (not loopback): plain HTTP; keep it firewalled behind your TLS proxy"
+		;;
+	esac
+
+	if [ -n "${CANVAS_CLOUD_PUBLIC_URL:-}" ]; then
+		PUBLIC_URL=$CANVAS_CLOUD_PUBLIC_URL
+	elif [ "$TLS_MODE" = off ]; then
+		if [ -n "${CANVAS_CLOUD_PUBLIC_HOST:-}${CANVAS_CLOUD_DOMAIN:-}" ]; then
+			# A named host with TLS off: clients reach it through a TLS proxy on 443.
+			host=$(detect_public_host)
+			PUBLIC_URL="https://$(url_host "$host")"
+		elif [ "$LOOPBACK" = 1 ]; then
+			# Loopback only: the clients are on this machine (a proxy or a linking service).
+			PUBLIC_URL="http://$LISTEN"
+		else
+			host=$(detect_public_host)
+			PUBLIC_URL="http://$(url_host "$host"):$PORT"
+		fi
+	else
+		host=$(detect_public_host)
+		if [ "$PORT" = 443 ]; then
+			PUBLIC_URL="https://$(url_host "$host")"
+		else
+			PUBLIC_URL="https://$(url_host "$host"):$PORT"
+		fi
+	fi
+}
+
+# Warn about inputs that a re-run (existing config) does not apply.
+warn_ignored_inputs() {
+	for v in CANVAS_CLOUD_PORT CANVAS_CLOUD_LISTEN CANVAS_CLOUD_TLS_MODE CANVAS_CLOUD_DOMAIN \
+		CANVAS_CLOUD_ACME_EMAIL CANVAS_CLOUD_PUBLIC_HOST CANVAS_CLOUD_PUBLIC_URL CANVAS_CLOUD_MASTER_KEY DATABASE_URL; do
+		eval "val=\${$v:-}"
+		# shellcheck disable=SC2154 # set by eval
+		[ -z "$val" ] || warn "$v ignored: $CONFIG exists (edit it, then systemctl restart canvas-cloud)"
+	done
+}
+
 write_config() {
 	if [ -f "$CONFIG" ]; then
 		log "keeping existing config $CONFIG (master key and database unchanged)"
+		warn_ignored_inputs
 		return
 	fi
-	port=${CANVAS_CLOUD_PORT:-443}
-	host=$(detect_public_host)
-	case "$host" in *:*:*) url_host="[$host]" ;; *) url_host=$host ;; esac
-	if [ "$port" = 443 ]; then public_url="https://$url_host"; else public_url="https://$url_host:$port"; fi
-	tls_mode=self-signed
-	set -- --tls-mode self-signed
-	if [ -n "${CANVAS_CLOUD_DOMAIN:-}" ]; then
-		tls_mode=acme
-		[ "$port" = 443 ] || warn "ACME (TLS-ALPN-01) needs port 443 reachable from the internet"
-		set -- --tls-mode acme --domain "$CANVAS_CLOUD_DOMAIN"
-		[ -z "${CANVAS_CLOUD_ACME_EMAIL:-}" ] || set -- "$@" --acme-email "$CANVAS_CLOUD_ACME_EMAIL"
+	resolve_settings
+	set -- --tls-mode "$TLS_MODE"
+	[ -z "$DOMAIN_ARG" ] || set -- "$@" --domain "$DOMAIN_ARG"
+	if [ "$TLS_MODE" = acme ] && [ -n "${CANVAS_CLOUD_ACME_EMAIL:-}" ]; then
+		set -- "$@" --acme-email "$CANVAS_CLOUD_ACME_EMAIL"
 	fi
 	if [ -n "${DATABASE_URL:-}" ]; then
 		db_url=$DATABASE_URL
@@ -418,16 +509,53 @@ write_config() {
 	else
 		db_url=$(setup_local_database)
 	fi
-	log "writing $CONFIG (public url $public_url, tls $tls_mode)"
+	log "writing $CONFIG (listen $LISTEN, public url $PUBLIC_URL, tls $TLS_MODE)"
 	# Secrets travel through the environment, never argv.
 	env -i PATH="$PATH" HOME=/root \
 		CANVAS_CLOUD_DATABASE_URL="$db_url" \
 		CANVAS_CLOUD_MASTER_KEY="${CANVAS_CLOUD_MASTER_KEY:-}" \
 		"$BIN" gen-config --write "$CONFIG" \
-		--public-url "$public_url" \
-		--listen "0.0.0.0:$port" \
+		--public-url "$PUBLIC_URL" \
+		--listen "$LISTEN" \
 		--state-dir "$STATE_DIR" \
 		"$@" >/dev/null
+}
+
+# --dry-run: what a fresh install would configure. Changes nothing, needs no root.
+dry_run() {
+	if [ -f "$CONFIG" ]; then
+		echo "$CONFIG exists: an install would keep it unchanged and only upgrade the binary."
+		echo
+	fi
+	resolve_settings
+	if [ -n "${DATABASE_URL:-}" ]; then
+		db="DATABASE_URL (external; nothing installed)"
+	else
+		db="local native PostgreSQL: role $DB_ROLE, database $DB_NAME, password generated"
+	fi
+	mk=generated
+	[ -z "${CANVAS_CLOUD_MASTER_KEY:-}" ] || mk="from CANVAS_CLOUD_MASTER_KEY"
+	if [ "$LOOPBACK" = 1 ]; then
+		fw="not opened (loopback only)"
+	elif [ "$TLS_MODE" = off ]; then
+		fw="not opened (plain HTTP; open it yourself if a proxy on another host connects)"
+	else
+		fw="open $PORT/tcp (ufw or firewalld, when active)"
+	fi
+	cat <<EOF
+listen       $LISTEN
+tls mode     $TLS_MODE
+public url   $PUBLIC_URL
+database     $db
+master key   $mk
+config       $CONFIG (0600, owner $SVC_USER)
+state        $STATE_DIR
+firewall     $fw
+
+The config would be written with:
+  canvas-cloud gen-config --write $CONFIG --public-url $PUBLIC_URL --listen $LISTEN \\
+    --state-dir $STATE_DIR --tls-mode $TLS_MODE${DOMAIN_ARG:+ --domain $DOMAIN_ARG}
+EOF
 }
 
 secure_files() {
@@ -440,6 +568,14 @@ secure_files() {
 open_firewall() {
 	port=$(sed -n 's/^listen *= *"[^"]*:\([0-9]*\)".*/\1/p' "$CONFIG" | head -n 1)
 	port=${port:-443}
+	if grep -Eq '^listen *= *"(127\.|\[::1\])' "$CONFIG"; then
+		log "listening on loopback only: firewall unchanged"
+		return
+	fi
+	if grep -q '^mode = "off"' "$CONFIG"; then
+		log "TLS is off: not opening $port/tcp in the firewall (the TLS proxy in front is what clients reach)"
+		return
+	fi
 	if have ufw && ufw status 2>/dev/null | grep -q '^Status: active'; then
 		ufw allow "$port/tcp" >/dev/null && log "ufw: allowed $port/tcp"
 	fi
@@ -500,6 +636,10 @@ main() {
 		print_unit
 		exit 0
 		;;
+	--dry-run)
+		dry_run
+		exit 0
+		;;
 	--uninstall)
 		uninstall 0
 		exit 0
@@ -547,8 +687,12 @@ main() {
 	echo
 	echo "canvas-cloud is running at $(config_public_url)"
 	echo
-	grep -q '^mode = "self-signed"' "$CONFIG" &&
+	if grep -q '^mode = "self-signed"' "$CONFIG"; then
 		echo "  (self-signed certificate: clients see a warning until you set CANVAS_CLOUD_DOMAIN or a proxy)"
+	elif grep -q '^mode = "off"' "$CONFIG"; then
+		echo "  (TLS is off: plain HTTP on $(sed -n 's/^listen *= *"\([^"]*\)".*/\1/p' "$CONFIG" | head -n 1);"
+		echo "   put a TLS-terminating reverse proxy in front, see docs/install.md)"
+	fi
 	echo "Next steps:"
 	echo "  create the first account: sudo canvas-cloud --config $CONFIG admin users create --email you@example.com --password-file -"
 	echo "  open signup to others:     sudo canvas-cloud --config $CONFIG admin settings set allow_signup true"

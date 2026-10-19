@@ -424,9 +424,8 @@ continue." The token is never echoed into HTML. The response is `Cache-Control: 
 ## Testing
 
 `cargo test -p canvas-cloud-engine` runs unit tests plus integration tests against the
-native Postgres database `cvc_engine_test` (default
-`postgres://farce@localhost:5433/cvc_engine_test`; override with
-`CANVAS_CLOUD_TEST_ENGINE_DATABASE_URL`): REST lifecycle, Personal
+native Postgres database `cvc_engine_test` (`CANVAS_CLOUD_TEST_ENGINE_DATABASE_URL`; setup in
+[CONTRIBUTING.md](../CONTRIBUTING.md)): REST lifecycle, Personal
 canvas, invites (re-send reminders, revocation), 404 scoping, two-client sync + awareness,
 persistence across eviction, compaction, ops fan-out, revocation, the `chat` array across
 eviction / restart / compaction (`tests/chat.rs`), and mentions — member filtering,
