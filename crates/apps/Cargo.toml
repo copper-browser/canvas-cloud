@@ -17,4 +17,27 @@ workspace = true
 [dependencies]
 canvas-cloud-core.workspace = true
 canvas-cloud-engine.workspace = true
+anyhow.workspace = true
+async-stream.workspace = true
 axum.workspace = true
+base64.workspace = true
+bytes.workspace = true
+futures.workspace = true
+hex.workspace = true
+metrics.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sqlx.workspace = true
+time.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+yrs.workspace = true
+
+[dev-dependencies]
+http-body-util.workspace = true
+rand.workspace = true
+reqwest.workspace = true
+tokio-tungstenite.workspace = true
+tower.workspace = true

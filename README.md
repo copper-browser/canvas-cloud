@@ -112,6 +112,10 @@ served web app (`web.root`, `web.app_url`), `features` and `limits`. A web app s
 - [docs/canvas.md](docs/canvas.md) — the canvas REST API, rooms, limits, metrics, security.
 - [docs/canvas-protocol.md](docs/canvas-protocol.md) — the WebSocket protocol, document
   schema, ops and read formats.
+- [docs/apps.md](docs/apps.md) — linked apps: `/v1/apps/self/*` provisioning, events,
+  canvases, stats, and the `canvas-cloud apps` CLI.
+- [docs/import-format.md](docs/import-format.md) — import format v1 (NDJSON) and the document
+  digest.
 
 ## Development
 
@@ -123,7 +127,8 @@ cargo test --workspace -j4     # needs native PostgreSQL; see below
 
 Integration tests use dedicated databases, overridable per crate:
 `CANVAS_CLOUD_TEST_CORE_DATABASE_URL` (`cvc_core_test`),
-`CANVAS_CLOUD_TEST_ENGINE_DATABASE_URL` (`cvc_engine_test`) and
+`CANVAS_CLOUD_TEST_ENGINE_DATABASE_URL` (`cvc_engine_test`),
+`CANVAS_CLOUD_TEST_APPS_DATABASE_URL` (`cvc_apps_test`) and
 `CANVAS_CLOUD_TEST_DATABASE_URL` (`cvc_bin_test`). Create them with `createdb`.
 
 ## License

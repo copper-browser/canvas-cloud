@@ -615,11 +615,46 @@ impl Rooms {
             peers: map.values().map(|r| r.peer_count()).sum(),
         }
     }
+
+    /// `(canvas id, connected peers)` of every room in memory.
+    pub(crate) fn open(&self) -> Vec<(Uuid, usize)> {
+        lock(&self.map)
+            .values()
+            .map(|r| (r.id, r.peer_count()))
+            .collect()
+    }
+
+    /// Runs `f` with the room of `id` shut (see [`crate::admin::with_room_shut`]).
+    pub(crate) async fn shut_while<F: std::future::Future>(&self, id: Uuid, f: F) -> F::Output {
+        let room = self.get(id);
+        room.closed.store(true, Ordering::Release);
+        room.kick(None, close::GOING_AWAY, "canvas replaced");
+        // Waits for an in-flight write (it persists under the old document) and keeps every
+        // later reader/writer of this room waiting until `f` is done; they then find the room
+        // closed (404).
+        let mut guard = room.doc.write().await;
+        *guard = None;
+        let out = f.await;
+        {
+            let mut map = lock(&self.map);
+            if map.get(&id).is_some_and(|r| Arc::ptr_eq(r, &room)) {
+                map.remove(&id);
+                metrics::gauge!("canvas_rooms").decrement(1.0);
+            }
+        }
+        drop(guard);
+        out
+    }
 }
 
 /// Current room/peer counts.
 pub fn rooms_metrics() -> RoomsMetrics {
     rooms().metrics()
+}
+
+/// `(canvas id, connected peers)` of every room currently in memory.
+pub fn open_rooms() -> Vec<(Uuid, usize)> {
+    rooms().open()
 }
 
 /// Graceful shutdown: tells every connected peer the server is going away (close 1001) so

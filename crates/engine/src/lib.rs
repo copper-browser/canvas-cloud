@@ -70,7 +70,7 @@ pub mod api {
 pub const FEATURES: &[&str] = &["canvases", "mentions", "share_links", "people"];
 pub use admin::{canvases_deleted, disconnect_user, owned_canvases};
 pub use room::{
-    close_all_rooms, evict_room_now, room_in_memory, rooms_metrics, RoomsMetrics,
+    close_all_rooms, evict_room_now, open_rooms, room_in_memory, rooms_metrics, RoomsMetrics,
     BROADCAST_CAPACITY, COMPACT_EVERY, EVENT_THROTTLE, IDLE_EVICT,
 };
 pub use ws::{close as close_codes, MAX_MESSAGE_BYTES, PING_EVERY, READ_TIMEOUT};

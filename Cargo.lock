@@ -558,9 +558,30 @@ dependencies = [
 name = "canvas-cloud-apps"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "async-stream",
  "axum",
+ "base64 0.22.1",
+ "bytes",
  "canvas-cloud-core",
  "canvas-cloud-engine",
+ "futures",
+ "hex",
+ "http-body-util",
+ "metrics",
+ "rand 0.8.8",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "time",
+ "tokio",
+ "tokio-tungstenite",
+ "tower",
+ "tracing",
+ "uuid",
+ "yrs",
 ]
 
 [[package]]
