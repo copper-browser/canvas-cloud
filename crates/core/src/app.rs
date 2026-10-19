@@ -248,6 +248,9 @@ pub const CORS_ALLOWED_HEADERS: &[&str] = &[
     "content-type",
     "x-canvas-user",
     "last-event-id",
+    // MCP Streamable HTTP clients running in a browser (`POST /mcp`).
+    "mcp-protocol-version",
+    "mcp-session-id",
 ];
 /// How long browsers may cache a preflight answer.
 pub const CORS_MAX_AGE: Duration = Duration::from_secs(600);
@@ -603,7 +606,12 @@ mod tests {
         assert_eq!(h["access-control-allow-origin"], "https://app.example.com");
         assert_eq!(h["access-control-max-age"], "600");
         let allowed = h["access-control-allow-headers"].to_str().unwrap();
-        for want in ["authorization", "content-type", "x-canvas-user"] {
+        for want in [
+            "authorization",
+            "content-type",
+            "x-canvas-user",
+            "mcp-protocol-version",
+        ] {
             assert!(allowed.contains(want), "{allowed}");
         }
         assert!(h.get("access-control-allow-credentials").is_none());
