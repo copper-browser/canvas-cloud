@@ -1,0 +1,1488 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Canvas Cloud API",
+    "version": "0.1.0",
+    "summary": "Collaborative canvases: REST, live Yjs rooms, accounts, linked apps and agent seams.",
+    "description": "Every route of a Canvas Cloud server. All `/v1` routes speak JSON; errors are always `{\"error\": \"<code>\", \"message\": \"…\"}` (409 conflicts may carry extra fields). Authenticate with `Authorization: Bearer <credential>`: a session token (`cvs_…`), a personal access token (`cvt_…`; read-scoped tokens may only GET/HEAD and never join a live room — `403 read_only_token`), or a linked-app key (`cva_…`) plus `X-Canvas-User: <subject>` to act as one of the app's users (without that header an app key is accepted only on `/v1/apps/self/*`). WebSocket upgrades and `text/event-stream` GETs may pass the credential as `?token=` instead. In canvas routes `{id}` is a canvas UUID or the literal `personal` (the caller's Personal canvas, created on first use). A canvas the caller is not a member of is indistinguishable from one that does not exist (`404`). Agents can also use the MCP endpoint (`POST /mcp`) and the plain-text guide at `/llms.txt`.",
+    "license": { "name": "MIT", "identifier": "MIT" }
+  },
+  "servers": [{ "url": "https://canvas.example.com", "description": "replaced by the server's public_url when served" }],
+  "security": [{ "bearer": [] }, { "appKey": [], "canvasUser": [] }],
+  "tags": [
+    { "name": "server", "description": "Server information and health." },
+    { "name": "canvases", "description": "Canvases, members, invites and share links." },
+    { "name": "documents", "description": "The canvas document: Yjs state, the agent read format, ops and the live WebSocket room." },
+    { "name": "mentions", "description": "Chat @mention notifications." },
+    { "name": "people", "description": "The people directory." },
+    { "name": "auth", "description": "Password accounts, sessions and OIDC sign-in." },
+    { "name": "tokens", "description": "Personal access tokens (session-authenticated)." },
+    { "name": "events", "description": "Server-sent change notifications." },
+    { "name": "apps", "description": "Linked apps acting as themselves (`cva_…` key without X-Canvas-User): user provisioning, events, administration, import." },
+    { "name": "agents", "description": "Agent seams: MCP, llms.txt and this document." }
+  ],
+  "paths": {
+    "/v1/info": {
+      "get": {
+        "tags": ["server"],
+        "operationId": "getInfo",
+        "summary": "What this server is and offers",
+        "description": "Public. Clients (and a web app probing its own origin) learn the server name, version, sign-in methods, web-app hosting, features and limits.",
+        "security": [],
+        "responses": {
+          "200": { "description": "Server information.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Info" } } } }
+        }
+      }
+    },
+    "/v1/canvases": {
+      "get": {
+        "tags": ["canvases"],
+        "operationId": "listCanvases",
+        "summary": "List your canvases",
+        "description": "Your canvases: the Personal canvas first (created on first use), then most recently updated.",
+        "responses": {
+          "200": { "description": "Canvases.", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Canvas" } } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      },
+      "post": {
+        "tags": ["canvases"],
+        "operationId": "createCanvas",
+        "summary": "Create a shared canvas",
+        "description": "Creates a `shared` canvas owned by the caller. `name` is trimmed, control characters dropped, 1–200 characters.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CanvasName" } } } },
+        "responses": {
+          "201": { "description": "The new canvas.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Canvas" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "413": { "$ref": "#/components/responses/PayloadTooLarge" }
+        }
+      }
+    },
+    "/v1/canvases/{id}": {
+      "parameters": [{ "$ref": "#/components/parameters/CanvasId" }],
+      "get": {
+        "tags": ["canvases"],
+        "operationId": "getCanvas",
+        "summary": "Get one canvas",
+        "responses": {
+          "200": { "description": "The canvas.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Canvas" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      },
+      "patch": {
+        "tags": ["canvases"],
+        "operationId": "renameCanvas",
+        "summary": "Rename a canvas",
+        "description": "Owner only (`403` for editors); `400` on the Personal canvas. Also updates the document's `meta.name` (synced to connected peers).",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CanvasName" } } } },
+        "responses": {
+          "200": { "description": "The renamed canvas.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Canvas" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      },
+      "delete": {
+        "tags": ["canvases"],
+        "operationId": "deleteCanvas",
+        "summary": "Delete a canvas",
+        "description": "Owner only; `400` on the Personal canvas. Deletes members, invites, links, updates and mentions (cascade) and closes the room (sockets get close code `4404`); former members get a `deleted` event.",
+        "responses": {
+          "200": { "$ref": "#/components/responses/Ok" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/canvases/{id}/members": {
+      "parameters": [{ "$ref": "#/components/parameters/CanvasId" }],
+      "get": {
+        "tags": ["canvases"],
+        "operationId": "listMembers",
+        "summary": "List a canvas's members",
+        "description": "Owner first, then by join time. Any member may list.",
+        "responses": {
+          "200": { "description": "Members.", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Member" } } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/canvases/{id}/members/{user_id}": {
+      "parameters": [
+        { "$ref": "#/components/parameters/CanvasId" },
+        { "name": "user_id", "in": "path", "required": true, "description": "The member's user id.", "schema": { "type": "string", "format": "uuid" } }
+      ],
+      "delete": {
+        "tags": ["canvases"],
+        "operationId": "removeMember",
+        "summary": "Remove a member, or leave",
+        "description": "The owner removes anyone else; any member removes themselves (leave). The owner cannot leave (`400`). Removed users' sockets close with `4403`.",
+        "responses": {
+          "200": { "$ref": "#/components/responses/Ok" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/canvases/{id}/invites": {
+      "parameters": [{ "$ref": "#/components/parameters/CanvasId" }],
+      "get": {
+        "tags": ["canvases"],
+        "operationId": "listCanvasInvites",
+        "summary": "List a canvas's pending invites",
+        "description": "Any member; newest first.",
+        "responses": {
+          "200": { "description": "Pending invites.", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Invite" } } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      },
+      "post": {
+        "tags": ["canvases"],
+        "operationId": "createInvite",
+        "summary": "Invite someone by email",
+        "description": "Owner or editor; not on the Personal canvas (`400`). Inviting yourself is `400`, an existing member `409`. A new invite is `201`; an already-pending email is a re-send (`200`): when the invitee has an account and the last reminder is at least 30 s old, `nudged_at` is set and the invitee gets another `invited` event (`nudged: true`).",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/InviteRequest" } } } },
+        "responses": {
+          "201": { "description": "New invite.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/InviteSent" } } } },
+          "200": { "description": "Already pending: re-sent.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/InviteSent" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
+    "/v1/canvases/{id}/invites/{invite_id}": {
+      "parameters": [
+        { "$ref": "#/components/parameters/CanvasId" },
+        { "name": "invite_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+      ],
+      "delete": {
+        "tags": ["canvases"],
+        "operationId": "revokeInvite",
+        "summary": "Revoke a pending invite",
+        "description": "The canvas owner or the member who sent it. The invitee (if they have an account) gets an `invite_revoked` event.",
+        "responses": {
+          "204": { "description": "Revoked." },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/invites": {
+      "get": {
+        "tags": ["canvases"],
+        "operationId": "listMyInvites",
+        "summary": "Your pending invites",
+        "description": "Pending invites addressed to your email (case-insensitive), newest first.",
+        "responses": {
+          "200": { "description": "Invites.", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Invite" } } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/v1/invites/{id}/accept": {
+      "parameters": [{ "$ref": "#/components/parameters/InviteId" }],
+      "post": {
+        "tags": ["canvases"],
+        "operationId": "acceptInvite",
+        "summary": "Accept an invite",
+        "description": "Only the invitee; anything else (wrong user, already used, declined, revoked, unknown) is `404`. Returns the canvas (your view, `role: editor`).",
+        "responses": {
+          "200": { "description": "The canvas you joined.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Canvas" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/invites/{id}/decline": {
+      "parameters": [{ "$ref": "#/components/parameters/InviteId" }],
+      "post": {
+        "tags": ["canvases"],
+        "operationId": "declineInvite",
+        "summary": "Decline an invite",
+        "responses": {
+          "200": { "$ref": "#/components/responses/Ok" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/canvases/{id}/links": {
+      "parameters": [{ "$ref": "#/components/parameters/CanvasId" }],
+      "get": {
+        "tags": ["canvases"],
+        "operationId": "listShareLinks",
+        "summary": "List a canvas's share links",
+        "description": "Owner only; tokens are never listed.",
+        "responses": {
+          "200": { "description": "Share links, newest first.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ShareLinkList" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      },
+      "post": {
+        "tags": ["canvases"],
+        "operationId": "createShareLink",
+        "summary": "Create a share link",
+        "description": "Any member; not on the Personal canvas. The body may be empty, `{}` or `{\"role\":\"editor\"}`. The token is shown only in this response; the web landing page is `/join/{token}`.",
+        "requestBody": { "required": false, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ShareLinkRequest" } } } },
+        "responses": {
+          "201": { "description": "The new link and its token.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreatedShareLink" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      },
+      "delete": {
+        "tags": ["canvases"],
+        "operationId": "revokeAllShareLinks",
+        "summary": "Revoke every share link",
+        "description": "Owner only.",
+        "responses": {
+          "204": { "description": "Revoked." },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/canvases/{id}/links/{link_id}": {
+      "parameters": [
+        { "$ref": "#/components/parameters/CanvasId" },
+        { "name": "link_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+      ],
+      "delete": {
+        "tags": ["canvases"],
+        "operationId": "revokeShareLink",
+        "summary": "Revoke one share link",
+        "description": "Owner only.",
+        "responses": {
+          "204": { "description": "Revoked." },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/canvas-links/{token}": {
+      "parameters": [{ "$ref": "#/components/parameters/ShareToken" }],
+      "get": {
+        "tags": ["canvases"],
+        "operationId": "previewShareLink",
+        "summary": "Preview what a share link opens",
+        "description": "Any signed-in user holding the token. Unknown, revoked or deleted-canvas tokens are `404 link_not_found`.",
+        "responses": {
+          "200": { "description": "Preview.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ShareLinkPreview" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/canvas-links/{token}/join": {
+      "parameters": [{ "$ref": "#/components/parameters/ShareToken" }],
+      "post": {
+        "tags": ["canvases"],
+        "operationId": "joinShareLink",
+        "summary": "Join a canvas through a share link",
+        "description": "Idempotent: adds an editor membership when needed (never downgrades the owner), accepts the caller's pending invite to the canvas, increments `uses`, publishes `member_added`. Returns the canvas as `GET /v1/canvases` shows it.",
+        "responses": {
+          "200": { "description": "The canvas.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Canvas" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/canvases/{id}/ws": {
+      "parameters": [{ "$ref": "#/components/parameters/CanvasId" }, { "$ref": "#/components/parameters/QueryToken" }],
+      "get": {
+        "tags": ["documents"],
+        "operationId": "canvasWebSocket",
+        "summary": "Join the live room (y-websocket)",
+        "description": "Upgrade to a WebSocket speaking the standard y-websocket protocol (sync step 1/2 and updates in lib0 v1 encoding, awareness). HTTP/2 extended CONNECT also works. Browsers pass `?token=`. Read-only tokens are refused (`403 read_only_token`). Messages ≤ 4 MiB. Close codes: `4401` credential no longer valid, `4403` removed from the canvas, `4404` canvas deleted, `1001` server shutting down, `1009` message too big. With the `y-websocket` client: `new WebsocketProvider(\"wss://host/v1/canvases\", \"<id>/ws\", doc, {params: {token}})`.",
+        "responses": {
+          "101": { "description": "Switching protocols." },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/canvases/{id}/state": {
+      "parameters": [{ "$ref": "#/components/parameters/CanvasId" }],
+      "get": {
+        "tags": ["documents"],
+        "operationId": "getCanvasState",
+        "summary": "The Yjs document as one update",
+        "parameters": [
+          { "name": "sv", "in": "query", "required": false, "description": "Base64 Yjs state vector: return only what the caller is missing.", "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "`state`: base64 lib0 v1 update.", "content": { "application/json": { "schema": { "type": "object", "required": ["state"], "properties": { "state": { "type": "string", "contentEncoding": "base64" } } } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/canvases/{id}/read": {
+      "parameters": [{ "$ref": "#/components/parameters/CanvasId" }],
+      "get": {
+        "tags": ["documents"],
+        "operationId": "readCanvas",
+        "summary": "The canvas in the agent read format",
+        "description": "Shapes sorted top-to-bottom then left-to-right, live agents, the shape count and the last 50 chat messages. Text, titles and labels are cut to 500 characters unless `full=true`.",
+        "parameters": [
+          { "name": "full", "in": "query", "required": false, "schema": { "type": "boolean", "default": false } },
+          { "name": "ids", "in": "query", "required": false, "description": "Comma-separated shape ids.", "schema": { "type": "string" } },
+          { "name": "types", "in": "query", "required": false, "description": "Comma-separated shape types.", "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "The read.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CanvasRead" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/canvases/{id}/ops": {
+      "parameters": [{ "$ref": "#/components/parameters/CanvasId" }],
+      "post": {
+        "tags": ["documents"],
+        "operationId": "applyOps",
+        "summary": "Edit the canvas with ops",
+        "description": "Applies up to 500 ops in order in one transaction, persisted and broadcast to the live room. A bad op is skipped and reported in `errors` (by index); the rest still apply. Envelope problems are `200` with `errors: [{index: -1, …}]`. Body ≤ 4 MiB. The body may also be a bare array of ops.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "oneOf": [{ "$ref": "#/components/schemas/OpsRequest" }, { "type": "array", "items": { "$ref": "#/components/schemas/Op" } }] } } } },
+        "responses": {
+          "200": { "description": "What applied.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OpsResult" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "413": { "$ref": "#/components/responses/PayloadTooLarge" }
+        }
+      }
+    },
+    "/v1/canvases/{id}/mentions": {
+      "parameters": [{ "$ref": "#/components/parameters/CanvasId" }],
+      "post": {
+        "tags": ["mentions"],
+        "operationId": "postMentions",
+        "summary": "Notify people mentioned in a chat message",
+        "description": "Called by the client that sent a chat message. Members of the canvas among `user_ids` (other than the caller) are notified (`mention` event, listed by `GET /v1/mentions`); others are `skipped`. At most 100 targets; `message_id` ≤ 128 characters; `excerpt` cut to 200 characters (stored encrypted). Rate limit: 60 calls per minute per user (`429`).",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/MentionRequest" } } } },
+        "responses": {
+          "200": { "description": "Who was notified.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/MentionsSent" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/v1/mentions": {
+      "get": {
+        "tags": ["mentions"],
+        "operationId": "listMentions",
+        "summary": "Your mentions",
+        "description": "Mentions of the caller on canvases they can still see, newest first, plus the total unread count.",
+        "parameters": [
+          { "name": "unread", "in": "query", "required": false, "description": "`1`/`true`: unread only.", "schema": { "type": "string", "enum": ["0", "1", "true", "false"] } },
+          { "name": "limit", "in": "query", "required": false, "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 50 } }
+        ],
+        "responses": {
+          "200": { "description": "Mentions.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/MentionList" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/v1/mentions/read": {
+      "post": {
+        "tags": ["mentions"],
+        "operationId": "markMentionsRead",
+        "summary": "Mark mentions read",
+        "description": "Send `ids` (≤ 500), `canvas_id`, or both (`400` with neither). The caller's other clients get a `mention_read` event.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/MarkReadRequest" } } } },
+        "responses": {
+          "200": { "description": "How many changed.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/MentionsRead" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      }
+    },
+    "/v1/people": {
+      "get": {
+        "tags": ["people"],
+        "operationId": "listPeople",
+        "summary": "Find people to invite or mention",
+        "description": "Other enabled users whose display name or email contains `q` (all when empty).",
+        "parameters": [
+          { "name": "q", "in": "query", "required": false, "schema": { "type": "string" } },
+          { "name": "limit", "in": "query", "required": false, "schema": { "type": "integer", "minimum": 1, "maximum": 50, "default": 20 } }
+        ],
+        "responses": {
+          "200": { "description": "People.", "content": { "application/json": { "schema": { "type": "object", "required": ["people"], "properties": { "people": { "type": "array", "items": { "$ref": "#/components/schemas/Person" } } } } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/v1/auth/signup": {
+      "post": {
+        "tags": ["auth"],
+        "operationId": "signup",
+        "summary": "Create a password account",
+        "description": "Public. The first password account on an instance may always be created; after that the server's signup policy decides (`allow_signup`, optionally narrowed to `signup_domains`; `GET /v1/info` → `signup`). Passwords are 10–256 characters. Returns a session.",
+        "security": [],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SignupRequest" } } } },
+        "responses": {
+          "201": { "description": "Signed up.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Session" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/v1/auth/login": {
+      "post": {
+        "tags": ["auth"],
+        "operationId": "login",
+        "summary": "Sign in with email and password",
+        "description": "Public. Any failure is the same `401 invalid_credentials`.",
+        "security": [],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LoginRequest" } } } },
+        "responses": {
+          "200": { "description": "Signed in.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Session" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/v1/auth/logout": {
+      "post": {
+        "tags": ["auth"],
+        "operationId": "logout",
+        "summary": "End this session (or all of them)",
+        "description": "Session credentials only (`403 session_required`). `{\"all\": true}` ends every session of the user.",
+        "security": [{ "bearer": [] }],
+        "requestBody": { "required": false, "content": { "application/json": { "schema": { "type": "object", "properties": { "all": { "type": "boolean", "default": false } } } } } },
+        "responses": {
+          "200": { "description": "Signed out.", "content": { "application/json": { "schema": { "type": "object", "required": ["ok", "revoked"], "properties": { "ok": { "const": true }, "revoked": { "type": "integer" } } } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      }
+    },
+    "/v1/auth/me": {
+      "get": {
+        "tags": ["auth"],
+        "operationId": "getMe",
+        "summary": "Who you are and how you authenticated",
+        "responses": {
+          "200": { "description": "You.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Me" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      },
+      "patch": {
+        "tags": ["auth"],
+        "operationId": "updateMe",
+        "summary": "Change your display name",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["display_name"], "properties": { "display_name": { "type": "string", "maxLength": 200 } } } } } },
+        "responses": {
+          "200": { "description": "You, updated.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Me" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      }
+    },
+    "/v1/auth/password": {
+      "post": {
+        "tags": ["auth"],
+        "operationId": "changePassword",
+        "summary": "Change your password",
+        "description": "Session credentials only. Ends every other session.",
+        "security": [{ "bearer": [] }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["current", "new"], "properties": { "current": { "type": "string" }, "new": { "type": "string", "minLength": 10, "maxLength": 256 } } } } } },
+        "responses": {
+          "200": { "description": "Changed.", "content": { "application/json": { "schema": { "type": "object", "required": ["ok", "revoked_sessions"], "properties": { "ok": { "const": true }, "revoked_sessions": { "type": "integer" } } } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/v1/auth/oidc": {
+      "get": {
+        "tags": ["auth"],
+        "operationId": "listOidcProviders",
+        "summary": "Single sign-on providers",
+        "description": "Public; for login buttons.",
+        "security": [],
+        "responses": {
+          "200": { "description": "Providers.", "content": { "application/json": { "schema": { "type": "object", "required": ["providers"], "properties": { "providers": { "type": "array", "items": { "$ref": "#/components/schemas/OidcProvider" } } } } } } }
+        }
+      }
+    },
+    "/v1/auth/oidc/{provider}/start": {
+      "parameters": [{ "$ref": "#/components/parameters/OidcProvider" }],
+      "get": {
+        "tags": ["auth"],
+        "operationId": "startOidc",
+        "summary": "Begin single sign-on (browser redirect)",
+        "description": "Public. Redirects to the identity provider (authorization code + PKCE + nonce). `redirect_uri` must be one of the provider's configured `redirect_uris` or same-origin with the server's `public_url`.",
+        "security": [],
+        "parameters": [
+          { "name": "redirect_uri", "in": "query", "required": true, "description": "Where to return with `#token=cvs_…`.", "schema": { "type": "string", "format": "uri" } }
+        ],
+        "responses": {
+          "302": { "description": "To the identity provider." },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/auth/oidc/{provider}/callback": {
+      "parameters": [{ "$ref": "#/components/parameters/OidcProvider" }],
+      "get": {
+        "tags": ["auth"],
+        "operationId": "oidcCallback",
+        "summary": "Single sign-on return (browser redirect)",
+        "description": "Public; the identity provider redirects here. Finds (or, when allowed, creates) the user by verified email, then redirects to the `redirect_uri` given to `start` with `#token=cvs_…` (or `#error=…`).",
+        "security": [],
+        "parameters": [
+          { "name": "code", "in": "query", "required": false, "schema": { "type": "string" } },
+          { "name": "state", "in": "query", "required": false, "schema": { "type": "string" } },
+          { "name": "error", "in": "query", "required": false, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "302": { "description": "Back to the client." },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/tokens": {
+      "get": {
+        "tags": ["tokens"],
+        "operationId": "listTokens",
+        "summary": "Your personal access tokens",
+        "description": "Session credentials only (`403 session_required`); live tokens, newest first; secrets are never listed.",
+        "security": [{ "bearer": [] }],
+        "responses": {
+          "200": { "description": "Tokens.", "content": { "application/json": { "schema": { "type": "object", "required": ["tokens", "limit"], "properties": { "tokens": { "type": "array", "items": { "$ref": "#/components/schemas/Token" } }, "limit": { "type": "integer", "description": "Most live tokens a user may have." } } } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      },
+      "post": {
+        "tags": ["tokens"],
+        "operationId": "createToken",
+        "summary": "Create a personal access token",
+        "description": "Session credentials only — a token cannot mint tokens. The `cvt_…` secret is in this response only. At most 50 live tokens (`403 token_limit`).",
+        "security": [{ "bearer": [] }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TokenRequest" } } } },
+        "responses": {
+          "201": { "description": "The token, with its secret.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreatedToken" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      }
+    },
+    "/v1/tokens/{id}": {
+      "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+      "delete": {
+        "tags": ["tokens"],
+        "operationId": "revokeToken",
+        "summary": "Revoke a personal access token",
+        "security": [{ "bearer": [] }],
+        "responses": {
+          "200": { "$ref": "#/components/responses/Ok" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/events": {
+      "get": {
+        "tags": ["events"],
+        "operationId": "streamEvents",
+        "summary": "Your canvas events (Server-Sent Events)",
+        "description": "Any credential (`?token=` accepted, since EventSource cannot set headers). Frames: `event: canvas` with `id: <n>` and `data: {\"type\":\"canvas\",\"canvas_id\",\"kind\"}` (kind: created, renamed, deleted, update, invited, invite_revoked, invite_declined, member_added, member_removed, mention, mention_read); `event: ready` once after any replay; `event: resync` when the resume point is gone or the stream lagged — refetch, then carry on; `: keepalive` every 15 s. Resume with `Last-Event-ID` (or `?last_event_id=`).",
+        "parameters": [
+          { "$ref": "#/components/parameters/QueryToken" },
+          { "name": "last_event_id", "in": "query", "required": false, "schema": { "type": "string" } },
+          { "name": "Last-Event-ID", "in": "header", "required": false, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "The stream.", "content": { "text/event-stream": { "schema": { "type": "string" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/v1/apps/self/users/{subject}": {
+      "parameters": [{ "$ref": "#/components/parameters/Subject" }],
+      "put": {
+        "tags": ["apps"],
+        "operationId": "upsertAppUser",
+        "summary": "Create or update one of your app's users",
+        "description": "A new user gets `id` when it is given, a UUID and free, else a new UUIDv7. When the email belongs to a user not linked to this app: with the app's `trust_email` the existing user is linked to this subject (id unchanged), else `409 email_taken`.",
+        "security": [{ "appKey": [] }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AppUserUpsert" } } } },
+        "responses": {
+          "200": { "description": "The user.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AppUser" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      },
+      "delete": {
+        "tags": ["apps"],
+        "operationId": "deleteAppUser",
+        "summary": "Delete or unlink one of your app's users",
+        "description": "A pure app user (no password, no other app link) is deleted with everything they own (their canvases are deleted, rooms closed with `4404`, members notified); otherwise the user is only unlinked from this app. Their sockets are disconnected either way.",
+        "security": [{ "appKey": [] }],
+        "responses": {
+          "200": { "description": "Done.", "content": { "application/json": { "schema": { "type": "object", "properties": { "ok": { "type": "boolean" } }, "additionalProperties": true } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/apps/self/users:batch": {
+      "post": {
+        "tags": ["apps"],
+        "operationId": "batchUpsertAppUsers",
+        "summary": "Create or update many users",
+        "description": "At most 1000 users; each is its own transaction, so one bad row does not sink the batch. Results are in request order.",
+        "security": [{ "appKey": [] }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["users"], "properties": { "users": { "type": "array", "maxItems": 1000, "items": { "$ref": "#/components/schemas/AppUserBatchItem" } } } } } } },
+        "responses": {
+          "200": { "description": "Per-user results.", "content": { "application/json": { "schema": { "type": "object", "required": ["results"], "properties": { "results": { "type": "array", "items": { "$ref": "#/components/schemas/AppUserBatchResult" } } } } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "413": { "$ref": "#/components/responses/PayloadTooLarge" }
+        }
+      }
+    },
+    "/v1/apps/self/users": {
+      "get": {
+        "tags": ["apps"],
+        "operationId": "listAppUsers",
+        "summary": "Your app's users",
+        "security": [{ "appKey": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/Limit" }, { "$ref": "#/components/parameters/Offset" }],
+        "responses": {
+          "200": { "description": "Users with their canvas counts.", "content": { "application/json": { "schema": { "type": "object", "required": ["users"], "properties": { "users": { "type": "array", "items": { "$ref": "#/components/schemas/AppUserListed" } }, "total": { "type": "integer" } }, "additionalProperties": true } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/v1/apps/self/users/{subject}/disconnect": {
+      "parameters": [{ "$ref": "#/components/parameters/Subject" }],
+      "post": {
+        "tags": ["apps"],
+        "operationId": "disconnectAppUser",
+        "summary": "Close a user's live sockets",
+        "security": [{ "appKey": [] }],
+        "responses": {
+          "200": { "description": "Disconnected.", "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/apps/self/events": {
+      "get": {
+        "tags": ["apps"],
+        "operationId": "streamAppEvents",
+        "summary": "Every canvas event of your app's users (Server-Sent Events)",
+        "description": "Frames: `event: canvas`, `id: <n>`, `data: {\"subject\",\"user_id\",\"canvas_id\",\"kind\"}`; `event: resync` with `data: {}` when the `Last-Event-ID` is no longer buffered; keepalive every 15 s.",
+        "security": [{ "appKey": [] }],
+        "parameters": [{ "name": "Last-Event-ID", "in": "header", "required": false, "schema": { "type": "string" } }],
+        "responses": {
+          "200": { "description": "The stream.", "content": { "text/event-stream": { "schema": { "type": "string" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/v1/apps/self/canvases": {
+      "get": {
+        "tags": ["apps"],
+        "operationId": "listAppCanvases",
+        "summary": "Canvases owned by your app's users",
+        "security": [{ "appKey": [] }],
+        "parameters": [
+          { "name": "kind", "in": "query", "required": false, "schema": { "type": "string", "enum": ["personal", "shared"] } },
+          { "$ref": "#/components/parameters/Limit" },
+          { "$ref": "#/components/parameters/Offset" }
+        ],
+        "responses": {
+          "200": { "description": "Canvases and the total.", "content": { "application/json": { "schema": { "type": "object", "required": ["canvases", "total"], "properties": { "canvases": { "type": "array", "items": { "$ref": "#/components/schemas/AppCanvas" } }, "total": { "type": "integer" } } } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/v1/apps/self/canvases/{id}": {
+      "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+      "delete": {
+        "tags": ["apps"],
+        "operationId": "deleteAppCanvas",
+        "summary": "Delete a canvas owned by one of your users",
+        "description": "Closes the room (`4404`) and publishes `deleted` to its members.",
+        "security": [{ "appKey": [] }],
+        "responses": {
+          "200": { "$ref": "#/components/responses/Ok" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/apps/self/canvases/{id}/digest": {
+      "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+      "get": {
+        "tags": ["apps"],
+        "operationId": "getAppCanvasDigest",
+        "summary": "Content digest of a stored canvas",
+        "description": "Lowercase hex SHA-256 of the canonical JSON rendering of the stored document (reloaded from the database); equal for any complete set of the same updates. Used to verify imports.",
+        "security": [{ "appKey": [] }],
+        "responses": {
+          "200": { "description": "The digest.", "content": { "application/json": { "schema": { "type": "object", "required": ["digest"], "properties": { "canvas_id": { "type": "string", "format": "uuid" }, "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" } }, "additionalProperties": true } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/apps/self/stats": {
+      "get": {
+        "tags": ["apps"],
+        "operationId": "getAppStats",
+        "summary": "Your app and its usage",
+        "security": [{ "appKey": [] }],
+        "responses": {
+          "200": { "description": "Stats.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AppStats" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/v1/apps/self/import": {
+      "post": {
+        "tags": ["apps"],
+        "operationId": "importCanvas",
+        "summary": "Import one canvas (import format v1)",
+        "description": "Requires the app's `allow_import` (`403` otherwise). The body is NDJSON, one canvas, lines in this order: `canvas`, `member`…, `invite`…, `link`…, `mention`…, `update`…, `end` (see the `Import*Line` schemas). Lines ≤ 32 MiB; the body limit is `limits.import_max_bytes` in `GET /v1/info`. Every subject must already be provisioned (`422 unknown_subject`). Errors name the line: `422 bad_line`, `bad_update`, `count_mismatch`, `incomplete_history`. `mode=create` (default): an existing id is `409 canvas_exists` with the stored `digest`. `mode=replace`: only for a canvas this app imported earlier. A Personal canvas replaces the owner's empty one; a non-empty one is `409 personal_exists` unless `mode=replace`.",
+        "security": [{ "appKey": [] }],
+        "parameters": [
+          { "name": "mode", "in": "query", "required": false, "schema": { "type": "string", "enum": ["create", "replace"], "default": "create" } }
+        ],
+        "requestBody": { "required": true, "content": { "application/x-ndjson": { "schema": { "$ref": "#/components/schemas/ImportLine" } } } },
+        "responses": {
+          "200": { "description": "Imported.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ImportResult" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "413": { "$ref": "#/components/responses/PayloadTooLarge" },
+          "422": { "$ref": "#/components/responses/Unprocessable" }
+        }
+      }
+    },
+    "/v1/openapi.json": {
+      "get": {
+        "tags": ["agents"],
+        "operationId": "getOpenApi",
+        "summary": "This document",
+        "description": "Public. `servers` is the server's configured public URL.",
+        "security": [],
+        "responses": {
+          "200": { "description": "OpenAPI 3.1.", "content": { "application/json": { "schema": { "type": "object" } } } }
+        }
+      }
+    },
+    "/mcp": {
+      "post": {
+        "tags": ["agents"],
+        "operationId": "mcp",
+        "summary": "Model Context Protocol endpoint",
+        "description": "MCP Streamable HTTP: one JSON-RPC 2.0 message per POST; a request gets one `application/json` response, a notification `202`. Protocol `2025-06-18` (also `2025-03-26`, including its batches); stateless (no `Mcp-Session-Id`). Same credentials as the REST API; read-only tokens see only the read tools. A browser `Origin` must be in the server's CORS allow-list (or be `public_url`'s origin), else `403`. Methods: `initialize`, `ping`, `tools/list`, `tools/call`. Tools: whoami, list_canvases, create_canvas, rename_canvas, read_canvas, apply_ops, list_members, invite, create_share_link, list_mentions, mark_mentions_read. Other HTTP methods: `405` with `Allow: POST`.",
+        "parameters": [
+          { "name": "MCP-Protocol-Version", "in": "header", "required": false, "schema": { "type": "string", "enum": ["2025-06-18", "2025-03-26"] } }
+        ],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/JsonRpcMessage" } } } },
+        "responses": {
+          "200": { "description": "The JSON-RPC response.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/JsonRpcMessage" } } } },
+          "202": { "description": "Notification accepted (no body)." },
+          "400": { "description": "Not a valid JSON-RPC message, a batch under 2025-06-18, or an unsupported MCP-Protocol-Version.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/JsonRpcMessage" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "description": "Origin not allowed.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/JsonRpcMessage" } } } },
+          "413": { "description": "Body too large.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/JsonRpcMessage" } } } }
+        }
+      }
+    },
+    "/llms.txt": {
+      "get": {
+        "tags": ["agents"],
+        "operationId": "getLlmsTxt",
+        "summary": "Plain-text guide for agents",
+        "description": "Public, `text/plain; charset=utf-8` (llmstxt.org shape): auth, MCP config, REST basics, ops cheat-sheet, live rooms, limits.",
+        "security": [],
+        "responses": {
+          "200": { "description": "The guide.", "content": { "text/plain": { "schema": { "type": "string" } } } }
+        }
+      }
+    },
+    "/join/{token}": {
+      "parameters": [{ "$ref": "#/components/parameters/ShareToken" }],
+      "get": {
+        "tags": ["canvases"],
+        "operationId": "joinLanding",
+        "summary": "Share-link landing page (browser)",
+        "description": "Public; never touches the database. With a web app configured (`web_app_url`, or `web_root`) a well-formed token redirects there; otherwise a plain \"open this link in your canvas app\" page.",
+        "security": [],
+        "responses": {
+          "302": { "description": "To the web app." },
+          "200": { "description": "Landing page.", "content": { "text/html": { "schema": { "type": "string" } } } }
+        }
+      }
+    },
+    "/healthz": {
+      "get": {
+        "tags": ["server"],
+        "operationId": "healthz",
+        "summary": "Liveness probe",
+        "security": [],
+        "responses": {
+          "200": { "description": "`ok`.", "content": { "text/plain": { "schema": { "const": "ok" } } } }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "A session (`cvs_…`, from login, signup or single sign-on) or a personal access token (`cvt_…`, from `POST /v1/tokens` or the /account page). Read-scoped tokens: GET/HEAD only. A linked-app key (`cva_…`) also goes here, with `X-Canvas-User` to act as one of the app's users."
+      },
+      "appKey": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "A linked-app key (`cva_…`). Without `X-Canvas-User` it may call only `/v1/apps/self/*`."
+      },
+      "canvasUser": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Canvas-User",
+        "description": "With an app key: the subject (the app's own user id) to act as; it must be provisioned via `PUT /v1/apps/self/users/{subject}` (`401 unknown_user` otherwise)."
+      }
+    },
+    "parameters": {
+      "CanvasId": { "name": "id", "in": "path", "required": true, "description": "A canvas UUID, or `personal` for the caller's Personal canvas.", "schema": { "oneOf": [{ "type": "string", "format": "uuid" }, { "const": "personal" }] } },
+      "InviteId": { "name": "id", "in": "path", "required": true, "description": "Invite id.", "schema": { "type": "string", "format": "uuid" } },
+      "ShareToken": { "name": "token", "in": "path", "required": true, "description": "The share-link token.", "schema": { "type": "string" } },
+      "QueryToken": { "name": "token", "in": "query", "required": false, "description": "The credential, for WebSocket upgrades and `text/event-stream` requests that cannot send `Authorization`.", "schema": { "type": "string" } },
+      "OidcProvider": { "name": "provider", "in": "path", "required": true, "description": "Provider id from `GET /v1/auth/oidc`.", "schema": { "type": "string" } },
+      "Subject": { "name": "subject", "in": "path", "required": true, "description": "The app's own id for the user.", "schema": { "type": "string" } },
+      "Limit": { "name": "limit", "in": "query", "required": false, "schema": { "type": "integer", "minimum": 1 } },
+      "Offset": { "name": "offset", "in": "query", "required": false, "schema": { "type": "integer", "minimum": 0, "default": 0 } }
+    },
+    "responses": {
+      "Ok": { "description": "Done.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Ok" } } } },
+      "BadRequest": { "description": "Invalid request (`bad_request`).", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "Unauthorized": {
+        "description": "Missing or invalid credential (`unauthorized`, `invalid_credentials`, `account_disabled`, `unknown_user`, …).",
+        "headers": { "WWW-Authenticate": { "schema": { "type": "string", "const": "Bearer realm=\"canvas-cloud\"" } } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+      },
+      "Forbidden": { "description": "Not allowed (`forbidden`, `read_only_token`, `session_required`, `token_limit`, `signup_closed`, …).", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "NotFound": { "description": "No such thing, or not visible to the caller (`not_found`, `link_not_found`, …).", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "Conflict": { "description": "Conflict (`conflict`, `email_taken`, `canvas_exists` with `digest`, `personal_exists`, …); may carry extra fields.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "PayloadTooLarge": { "description": "Body over the route's limit (`payload_too_large`).", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "RateLimited": {
+        "description": "Too many requests (`rate_limited`).",
+        "headers": { "Retry-After": { "schema": { "type": "integer" } } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+      },
+      "Unprocessable": { "description": "The import body is well-formed but invalid; `message` names the line (`bad_line`, `bad_update`, `unknown_subject`, `count_mismatch`, `incomplete_history`).", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "required": ["error"],
+        "properties": {
+          "error": { "type": "string", "description": "Stable machine-readable code." },
+          "message": { "type": "string", "description": "Human-readable detail." }
+        },
+        "additionalProperties": true
+      },
+      "Ok": { "type": "object", "required": ["ok"], "properties": { "ok": { "const": true } } },
+      "Timestamp": { "type": "string", "format": "date-time", "description": "RFC 3339." },
+      "Info": {
+        "type": "object",
+        "required": ["name", "version", "public_url", "signup", "auth", "web", "features", "limits"],
+        "properties": {
+          "name": { "const": "canvas-cloud" },
+          "version": { "type": "string" },
+          "public_url": { "type": "string", "format": "uri" },
+          "signup": { "type": "boolean", "description": "Whether `POST /v1/auth/signup` is open." },
+          "auth": {
+            "type": "object",
+            "required": ["password", "oidc"],
+            "properties": {
+              "password": { "type": "boolean" },
+              "oidc": { "type": "array", "items": { "$ref": "#/components/schemas/OidcProvider" } }
+            }
+          },
+          "web": {
+            "type": "object",
+            "required": ["root", "app_url"],
+            "properties": {
+              "root": { "type": "boolean", "description": "This server hosts a canvas web app at `/`." },
+              "app_url": { "type": ["string", "null"], "description": "Share-link web target (`{token}` substituted)." }
+            }
+          },
+          "features": { "type": "array", "items": { "type": "string" }, "description": "e.g. canvases, mentions, share_links, people, accounts, access_tokens, events, oidc, apps, import, mcp." },
+          "limits": { "type": "object", "additionalProperties": true, "properties": { "auth_per_minute": { "type": "integer" }, "import_max_bytes": { "type": "integer" }, "import_max_line_bytes": { "type": "integer" } } }
+        }
+      },
+      "UserRef": {
+        "type": "object",
+        "required": ["id", "email", "display_name"],
+        "properties": { "id": { "type": "string", "format": "uuid" }, "email": { "type": "string" }, "display_name": { "type": "string" } }
+      },
+      "CanvasName": {
+        "type": "object",
+        "required": ["name"],
+        "properties": { "name": { "type": "string", "minLength": 1, "maxLength": 200 } }
+      },
+      "Canvas": {
+        "type": "object",
+        "required": ["id", "name", "kind", "role", "owner", "member_count", "created_at", "updated_at"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "name": { "type": "string" },
+          "kind": { "type": "string", "enum": ["personal", "shared"] },
+          "role": { "type": "string", "enum": ["owner", "editor"], "description": "The caller's role." },
+          "owner": { "$ref": "#/components/schemas/UserRef" },
+          "member_count": { "type": "integer" },
+          "created_at": { "$ref": "#/components/schemas/Timestamp" },
+          "updated_at": { "$ref": "#/components/schemas/Timestamp" }
+        }
+      },
+      "Member": {
+        "type": "object",
+        "required": ["user_id", "email", "display_name", "role", "added_at"],
+        "properties": {
+          "user_id": { "type": "string", "format": "uuid" },
+          "email": { "type": "string" },
+          "display_name": { "type": "string" },
+          "role": { "type": "string", "enum": ["owner", "editor"] },
+          "added_at": { "$ref": "#/components/schemas/Timestamp" }
+        }
+      },
+      "InviteRequest": { "type": "object", "required": ["email"], "properties": { "email": { "type": "string", "format": "email" } } },
+      "Invite": {
+        "type": "object",
+        "required": ["id", "canvas_id", "canvas_name", "email", "status", "invited_by", "invitee", "created_at", "nudged_at"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "canvas_id": { "type": "string", "format": "uuid" },
+          "canvas_name": { "type": "string" },
+          "email": { "type": "string" },
+          "status": { "type": "string", "enum": ["pending", "accepted", "declined", "revoked"] },
+          "invited_by": { "oneOf": [{ "$ref": "#/components/schemas/UserRef" }, { "type": "null" }] },
+          "invitee": { "oneOf": [{ "$ref": "#/components/schemas/UserRef" }, { "type": "null" }], "description": "The account with that email, when one exists." },
+          "created_at": { "$ref": "#/components/schemas/Timestamp" },
+          "nudged_at": { "type": ["string", "null"], "format": "date-time" }
+        }
+      },
+      "InviteSent": {
+        "allOf": [
+          { "$ref": "#/components/schemas/Invite" },
+          { "type": "object", "required": ["nudged"], "properties": { "nudged": { "type": "boolean", "description": "This re-send reminded the invitee." } } }
+        ]
+      },
+      "ShareLinkRequest": { "type": "object", "properties": { "role": { "const": "editor" } } },
+      "ShareLink": {
+        "type": "object",
+        "required": ["id", "role", "created_by", "created_at", "uses"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "role": { "const": "editor" },
+          "created_by": { "type": ["string", "null"], "format": "uuid" },
+          "created_at": { "$ref": "#/components/schemas/Timestamp" },
+          "uses": { "type": "integer" }
+        }
+      },
+      "ShareLinkList": { "type": "object", "required": ["links"], "properties": { "links": { "type": "array", "items": { "$ref": "#/components/schemas/ShareLink" } } } },
+      "CreatedShareLink": {
+        "type": "object",
+        "required": ["id", "token", "canvas_id", "role", "created_at"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "token": { "type": "string", "description": "Shown only here. Open `/join/{token}` or call `POST /v1/canvas-links/{token}/join`." },
+          "canvas_id": { "type": "string", "format": "uuid" },
+          "role": { "const": "editor" },
+          "created_at": { "$ref": "#/components/schemas/Timestamp" }
+        }
+      },
+      "ShareLinkPreview": {
+        "type": "object",
+        "required": ["canvas_id", "name", "owner", "role", "member"],
+        "properties": {
+          "canvas_id": { "type": "string", "format": "uuid" },
+          "name": { "type": "string" },
+          "owner": { "type": "object", "required": ["id", "display_name"], "properties": { "id": { "type": "string", "format": "uuid" }, "display_name": { "type": "string" } } },
+          "role": { "const": "editor" },
+          "member": { "type": "boolean", "description": "The caller is already a member." }
+        }
+      },
+      "Person": {
+        "type": "object",
+        "required": ["id", "display_name", "email"],
+        "properties": { "id": { "type": "string", "format": "uuid" }, "display_name": { "type": "string" }, "email": { "type": "string" } }
+      },
+      "Color": { "type": "string", "description": "A palette name (yellow, pink, blue, green, purple, gray, white) or `#rgb` / `#rrggbb`." },
+      "Endpoint": {
+        "description": "An arrow end: a free point, or a reference to a shape (optionally pinned to a side).",
+        "oneOf": [
+          { "type": "object", "required": ["x", "y"], "properties": { "x": { "type": "number" }, "y": { "type": "number" } } },
+          { "type": "object", "required": ["ref"], "properties": { "ref": { "type": "string" }, "side": { "type": "string", "enum": ["top", "right", "bottom", "left"] } } }
+        ]
+      },
+      "Shape": {
+        "type": "object",
+        "description": "One shape in the read format. Which optional fields appear depends on `type`.",
+        "required": ["id", "type", "x", "y", "w", "h", "color", "z"],
+        "properties": {
+          "id": { "type": "string" },
+          "type": { "type": "string", "enum": ["sticky", "text", "frame", "arrow", "image", "link", "checklist"] },
+          "x": { "type": "number" }, "y": { "type": "number" }, "w": { "type": "number" }, "h": { "type": "number" },
+          "color": { "type": "string" },
+          "z": { "type": "number" },
+          "by": { "type": "string", "description": "Who created it (an agent name or a user)." },
+          "text": { "type": "string" },
+          "fontSize": { "type": "number" },
+          "align": { "type": "string", "enum": ["left", "center", "right"] },
+          "title": { "type": "string" },
+          "image": { "type": "object", "properties": { "src": { "type": "string" }, "naturalW": { "type": "number" }, "naturalH": { "type": "number" } } },
+          "label": { "type": "string" },
+          "from": { "$ref": "#/components/schemas/Endpoint" },
+          "to": { "$ref": "#/components/schemas/Endpoint" },
+          "src": { "type": "string", "description": "Image source; `data:` URLs are described, not echoed." },
+          "naturalW": { "type": "number" }, "naturalH": { "type": "number" },
+          "url": { "type": "string" },
+          "columns": { "type": "array", "items": { "type": "string" } },
+          "rows": { "type": "array", "items": { "type": "object", "required": ["id", "label", "pick"], "properties": { "id": { "type": "string" }, "label": { "type": "string" }, "pick": { "type": ["string", "null"] }, "by": { "type": "string" }, "at": {} } } },
+          "tally": { "type": "object", "additionalProperties": { "type": "integer" }, "description": "Picks per column, in column order." },
+          "frame": { "type": "string", "description": "The innermost frame this shape sits in." }
+        }
+      },
+      "Agent": {
+        "type": "object",
+        "required": ["id", "name", "color", "cursor", "status", "updatedAt"],
+        "properties": {
+          "id": { "type": "string" }, "name": { "type": "string" }, "color": { "type": "string" },
+          "cursor": { "type": ["object", "null"], "properties": { "x": { "type": "number" }, "y": { "type": "number" } } },
+          "status": { "type": "string" },
+          "updatedAt": { "type": "number", "description": "ms since the epoch." }
+        }
+      },
+      "ChatMessage": {
+        "type": "object",
+        "required": ["id", "authorId", "authorName", "text", "mentions", "at"],
+        "properties": {
+          "id": { "type": "string" }, "authorId": { "type": "string" }, "authorName": { "type": "string" },
+          "text": { "type": "string", "description": "Cut to 500 characters unless `full`." },
+          "mentions": { "type": "array", "items": { "type": "string" } },
+          "at": { "type": "number", "description": "ms since the epoch." },
+          "editedAt": { "type": "number" }
+        }
+      },
+      "CanvasRead": {
+        "type": "object",
+        "required": ["canvas", "shapes", "agents", "selection", "count", "chat"],
+        "properties": {
+          "canvas": { "type": "object", "required": ["id", "name", "kind"], "properties": { "id": { "type": "string" }, "name": { "type": "string" }, "kind": { "type": "string" } } },
+          "shapes": { "type": "array", "items": { "$ref": "#/components/schemas/Shape" } },
+          "agents": { "type": "array", "items": { "$ref": "#/components/schemas/Agent" }, "description": "Agents written to in the last 2 minutes." },
+          "selection": { "type": "array", "items": { "type": "string" }, "description": "Always empty on the server." },
+          "count": { "type": "integer", "description": "Every readable shape (before `ids`/`types`)." },
+          "chat": { "type": "array", "items": { "$ref": "#/components/schemas/ChatMessage" }, "description": "The last 50 messages, oldest first." }
+        }
+      },
+      "ShapeInput": {
+        "type": "object",
+        "required": ["type"],
+        "description": "A shape to add. Omit `x` and `y` to auto-place it in free space near the request's `near`.",
+        "properties": {
+          "type": { "type": "string", "enum": ["sticky", "text", "frame", "arrow", "image", "link", "checklist"] },
+          "id": { "type": "string", "pattern": "^[A-Za-z0-9_\\-:.]{1,64}$" },
+          "x": { "type": "number" }, "y": { "type": "number" }, "w": { "type": "number" }, "h": { "type": "number" },
+          "color": { "$ref": "#/components/schemas/Color" },
+          "z": { "type": "number" },
+          "text": { "type": "string", "maxLength": 20000 },
+          "fontSize": { "type": "number", "minimum": 6, "maximum": 240 },
+          "align": { "type": "string", "enum": ["left", "center", "right"] },
+          "title": { "type": "string" },
+          "label": { "type": "string" },
+          "from": { "oneOf": [{ "type": "string" }, { "$ref": "#/components/schemas/Endpoint" }] },
+          "to": { "oneOf": [{ "type": "string" }, { "$ref": "#/components/schemas/Endpoint" }] },
+          "src": { "type": "string", "description": "https: URL or `data:image/…` (≤ 2 MiB)." },
+          "naturalW": { "type": "number" }, "naturalH": { "type": "number" },
+          "url": { "type": "string", "description": "http, https, mailto (plus any configured extra schemes); bare hosts get https://." },
+          "columns": { "type": "array", "minItems": 1, "maxItems": 4, "items": { "type": "string" } },
+          "rows": { "type": "array", "maxItems": 60, "items": { "oneOf": [{ "type": "string" }, { "type": "object", "required": ["label"], "properties": { "label": { "type": "string" }, "id": { "type": "string" } } }] } },
+          "picks": { "type": "object", "additionalProperties": { "type": ["string", "boolean", "null"] } }
+        },
+        "additionalProperties": true
+      },
+      "Op": {
+        "description": "One edit. Ids may be written `shape:<id>`; later ops can refer to ids added earlier in the same request.",
+        "oneOf": [
+          { "type": "object", "required": ["op", "shape"], "properties": { "op": { "const": "add" }, "shape": { "$ref": "#/components/schemas/ShapeInput" } } },
+          { "type": "object", "required": ["op", "id", "patch"], "properties": { "op": { "const": "update" }, "id": { "type": "string" }, "patch": { "type": "object", "additionalProperties": true } } },
+          { "type": "object", "required": ["op", "id"], "properties": { "op": { "const": "move" }, "id": { "type": "string" }, "dx": { "type": "number" }, "dy": { "type": "number" } } },
+          { "type": "object", "required": ["op", "id"], "properties": { "op": { "const": "resize" }, "id": { "type": "string" }, "w": { "type": "number" }, "h": { "type": "number" } } },
+          { "type": "object", "required": ["op", "id"], "properties": { "op": { "const": "delete" }, "id": { "type": "string" } } },
+          { "type": "object", "required": ["op", "from", "to"], "properties": { "op": { "const": "connect" }, "from": { "type": "string" }, "to": { "type": "string" }, "label": { "type": "string" }, "color": { "$ref": "#/components/schemas/Color" }, "fromSide": { "type": "string" }, "toSide": { "type": "string" }, "id": { "type": "string" } } },
+          { "type": "object", "required": ["op"], "properties": { "op": { "const": "clear" } }, "description": "Deletes every shape; refused unless the request has `confirm: true`." }
+        ]
+      },
+      "OpsRequest": {
+        "type": "object",
+        "required": ["ops"],
+        "properties": {
+          "ops": { "type": "array", "maxItems": 500, "items": { "$ref": "#/components/schemas/Op" } },
+          "as": {
+            "description": "The agent doing the edit: created shapes get `by` = name and its cursor shows in the room. A bare string is a name.",
+            "oneOf": [
+              { "type": "string" },
+              { "type": "object", "required": ["name"], "properties": { "id": { "type": "string" }, "name": { "type": "string" }, "color": { "$ref": "#/components/schemas/Color" } } }
+            ]
+          },
+          "near": { "type": "object", "required": ["x", "y"], "properties": { "x": { "type": "number" }, "y": { "type": "number" } }, "description": "Where auto-placement looks for free space." },
+          "confirm": { "type": "boolean", "description": "Required (`true`) for `clear`." }
+        }
+      },
+      "OpsResult": {
+        "type": "object",
+        "required": ["applied", "ids", "errors"],
+        "properties": {
+          "applied": { "type": "integer" },
+          "ids": { "type": "array", "items": { "type": ["string", "null"] }, "description": "Per op: the shape id it created or touched; null when it failed, and for clear." },
+          "errors": { "type": "array", "items": { "type": "object", "required": ["index", "op", "error"], "properties": { "index": { "type": "integer", "description": "Op index; -1 for a problem with the whole request." }, "op": { "type": "string" }, "error": { "type": "string" } } } }
+        }
+      },
+      "MentionRequest": {
+        "type": "object",
+        "required": ["message_id"],
+        "properties": {
+          "message_id": { "type": "string", "maxLength": 128 },
+          "user_ids": { "type": "array", "maxItems": 100, "items": { "type": "string", "format": "uuid" } },
+          "excerpt": { "type": "string" }
+        }
+      },
+      "MentionsSent": {
+        "type": "object",
+        "required": ["notified", "skipped"],
+        "properties": {
+          "notified": { "type": "array", "items": { "type": "string", "format": "uuid" } },
+          "skipped": { "type": "array", "items": { "type": "string", "format": "uuid" } }
+        }
+      },
+      "Mention": {
+        "type": "object",
+        "required": ["id", "canvas", "from", "message_id", "excerpt", "created_at", "read_at"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "canvas": { "type": "object", "required": ["id", "name"], "properties": { "id": { "type": "string", "format": "uuid" }, "name": { "type": "string" } } },
+          "from": { "$ref": "#/components/schemas/UserRef" },
+          "message_id": { "type": "string" },
+          "excerpt": { "type": "string", "maxLength": 200 },
+          "created_at": { "$ref": "#/components/schemas/Timestamp" },
+          "read_at": { "type": ["string", "null"], "format": "date-time" }
+        }
+      },
+      "MentionList": {
+        "type": "object",
+        "required": ["mentions", "unread"],
+        "properties": { "mentions": { "type": "array", "items": { "$ref": "#/components/schemas/Mention" } }, "unread": { "type": "integer" } }
+      },
+      "MarkReadRequest": {
+        "type": "object",
+        "properties": {
+          "ids": { "type": "array", "maxItems": 500, "items": { "type": "string", "format": "uuid" } },
+          "canvas_id": { "type": "string", "format": "uuid" }
+        }
+      },
+      "MentionsRead": { "type": "object", "required": ["ok", "updated"], "properties": { "ok": { "const": true }, "updated": { "type": "integer" } } },
+      "User": {
+        "type": "object",
+        "required": ["id", "email", "display_name", "created_at"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "email": { "type": "string" },
+          "display_name": { "type": "string" },
+          "created_at": { "$ref": "#/components/schemas/Timestamp" }
+        }
+      },
+      "SignupRequest": {
+        "type": "object",
+        "required": ["email", "password"],
+        "properties": { "email": { "type": "string", "format": "email" }, "password": { "type": "string", "minLength": 10, "maxLength": 256 }, "display_name": { "type": "string", "maxLength": 200 } }
+      },
+      "LoginRequest": { "type": "object", "required": ["email", "password"], "properties": { "email": { "type": "string" }, "password": { "type": "string" } } },
+      "Session": {
+        "type": "object",
+        "required": ["token", "user"],
+        "properties": { "token": { "type": "string", "description": "`cvs_…` session token." }, "user": { "$ref": "#/components/schemas/User" } }
+      },
+      "Via": {
+        "type": "object",
+        "required": ["kind"],
+        "properties": {
+          "kind": { "type": "string", "enum": ["session", "token", "app"] },
+          "scope": { "type": "string", "enum": ["read", "write"], "description": "For tokens." },
+          "app_id": { "type": "string", "format": "uuid", "description": "For linked apps." }
+        }
+      },
+      "Me": { "type": "object", "required": ["user", "via"], "properties": { "user": { "$ref": "#/components/schemas/User" }, "via": { "$ref": "#/components/schemas/Via" } } },
+      "OidcProvider": {
+        "type": "object",
+        "required": ["id", "name", "start"],
+        "properties": { "id": { "type": "string" }, "name": { "type": "string" }, "start": { "type": "string", "description": "`/v1/auth/oidc/{id}/start`; add `?redirect_uri=`." } }
+      },
+      "TokenRequest": {
+        "type": "object",
+        "required": ["name", "scope"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+          "scope": { "type": "string", "enum": ["read", "write"] },
+          "expires_in_days": { "type": "integer", "minimum": 1, "maximum": 3650, "description": "Omit for a token that never expires." }
+        }
+      },
+      "Token": {
+        "type": "object",
+        "required": ["id", "name", "scope", "created_at", "last_used_at", "expires_at"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "name": { "type": "string" },
+          "scope": { "type": "string", "enum": ["read", "write"] },
+          "created_at": { "$ref": "#/components/schemas/Timestamp" },
+          "last_used_at": { "type": ["string", "null"], "format": "date-time" },
+          "expires_at": { "type": ["string", "null"], "format": "date-time" }
+        }
+      },
+      "CreatedToken": {
+        "allOf": [
+          { "$ref": "#/components/schemas/Token" },
+          { "type": "object", "required": ["token"], "properties": { "token": { "type": "string", "description": "The `cvt_…` secret; shown only here." } } }
+        ]
+      },
+      "AppUserUpsert": {
+        "type": "object",
+        "required": ["email"],
+        "properties": {
+          "email": { "type": "string", "format": "email" },
+          "display_name": { "type": "string" },
+          "disabled": { "type": "boolean" },
+          "id": { "type": "string", "format": "uuid", "description": "Preferred id for a new user (used when free)." }
+        }
+      },
+      "AppUser": {
+        "type": "object",
+        "required": ["user_id", "subject", "email", "display_name", "disabled", "created"],
+        "properties": {
+          "user_id": { "type": "string", "format": "uuid" },
+          "subject": { "type": "string" },
+          "email": { "type": "string" },
+          "display_name": { "type": "string" },
+          "disabled": { "type": "boolean" },
+          "created": { "type": "boolean", "description": "A new user was created." }
+        }
+      },
+      "AppUserBatchItem": {
+        "allOf": [{ "$ref": "#/components/schemas/AppUserUpsert" }, { "type": "object", "required": ["subject"], "properties": { "subject": { "type": "string" } } }]
+      },
+      "AppUserBatchResult": {
+        "oneOf": [
+          { "allOf": [{ "$ref": "#/components/schemas/AppUser" }, { "type": "object", "required": ["ok"], "properties": { "ok": { "const": true } } }] },
+          { "type": "object", "required": ["subject", "ok", "error", "message"], "properties": { "subject": { "type": "string" }, "ok": { "const": false }, "error": { "type": "string" }, "message": { "type": "string" } } }
+        ]
+      },
+      "AppUserListed": {
+        "type": "object",
+        "required": ["user_id", "subject", "email", "display_name", "canvas_count"],
+        "properties": {
+          "user_id": { "type": "string", "format": "uuid" },
+          "subject": { "type": "string" },
+          "email": { "type": "string" },
+          "display_name": { "type": "string" },
+          "disabled": { "type": "boolean" },
+          "canvas_count": { "type": "integer" }
+        },
+        "additionalProperties": true
+      },
+      "AppCanvas": {
+        "type": "object",
+        "required": ["id", "name", "kind", "owner", "member_count", "share_link_count", "created_at", "updated_at"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "name": { "type": "string" },
+          "kind": { "type": "string", "enum": ["personal", "shared"] },
+          "owner": { "type": "object", "required": ["subject", "user_id", "email", "display_name"], "properties": { "subject": { "type": "string" }, "user_id": { "type": "string", "format": "uuid" }, "email": { "type": "string" }, "display_name": { "type": "string" } } },
+          "member_count": { "type": "integer" },
+          "share_link_count": { "type": "integer" },
+          "created_at": { "$ref": "#/components/schemas/Timestamp" },
+          "updated_at": { "$ref": "#/components/schemas/Timestamp" }
+        }
+      },
+      "AppStats": {
+        "type": "object",
+        "required": ["app", "users", "canvases", "rooms"],
+        "properties": {
+          "app": { "type": "object", "required": ["id", "name", "allow_import"], "properties": { "id": { "type": "string", "format": "uuid" }, "name": { "type": "string" }, "allow_import": { "type": "boolean" } } },
+          "users": { "type": "integer" },
+          "canvases": { "type": "integer" },
+          "rooms": { "type": "object", "required": ["rooms", "peers"], "properties": { "rooms": { "type": "integer" }, "peers": { "type": "integer" } } }
+        }
+      },
+      "ImportLine": {
+        "description": "One NDJSON line of import format v1.",
+        "oneOf": [
+          { "$ref": "#/components/schemas/ImportCanvasLine" },
+          { "$ref": "#/components/schemas/ImportMemberLine" },
+          { "$ref": "#/components/schemas/ImportInviteLine" },
+          { "$ref": "#/components/schemas/ImportLinkLine" },
+          { "$ref": "#/components/schemas/ImportMentionLine" },
+          { "$ref": "#/components/schemas/ImportUpdateLine" },
+          { "$ref": "#/components/schemas/ImportEndLine" }
+        ],
+        "discriminator": { "propertyName": "type" }
+      },
+      "ImportCanvasLine": {
+        "type": "object",
+        "required": ["type", "version", "id", "name", "kind", "owner", "created_at", "updated_at"],
+        "properties": {
+          "type": { "const": "canvas" },
+          "version": { "const": 1 },
+          "id": { "type": "string", "format": "uuid" },
+          "name": { "type": "string" },
+          "kind": { "type": "string", "enum": ["personal", "shared"] },
+          "owner": { "type": "string", "description": "Subject." },
+          "created_at": { "$ref": "#/components/schemas/Timestamp" },
+          "updated_at": { "$ref": "#/components/schemas/Timestamp" }
+        }
+      },
+      "ImportMemberLine": {
+        "type": "object",
+        "required": ["type", "subject", "role", "added_at"],
+        "properties": { "type": { "const": "member" }, "subject": { "type": "string" }, "role": { "type": "string", "enum": ["owner", "editor"] }, "added_at": { "$ref": "#/components/schemas/Timestamp" } }
+      },
+      "ImportInviteLine": {
+        "type": "object",
+        "required": ["type", "id", "email", "invited_by", "status", "created_at"],
+        "properties": {
+          "type": { "const": "invite" },
+          "id": { "type": "string", "format": "uuid" },
+          "email": { "type": "string" },
+          "invited_by": { "type": ["string", "null"], "description": "Subject." },
+          "status": { "type": "string", "enum": ["pending", "accepted", "declined", "revoked"] },
+          "created_at": { "$ref": "#/components/schemas/Timestamp" },
+          "accepted_at": { "type": ["string", "null"], "format": "date-time" },
+          "nudged_at": { "type": ["string", "null"], "format": "date-time" },
+          "token_sha256_hex": { "type": "string" }
+        }
+      },
+      "ImportLinkLine": {
+        "type": "object",
+        "required": ["type", "id", "token_sha256_hex", "role", "created_by", "created_at", "uses"],
+        "properties": {
+          "type": { "const": "link" },
+          "id": { "type": "string", "format": "uuid" },
+          "token_sha256_hex": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Digest of the token, so existing links keep working." },
+          "role": { "const": "editor" },
+          "created_by": { "type": ["string", "null"], "description": "Subject." },
+          "created_at": { "$ref": "#/components/schemas/Timestamp" },
+          "uses": { "type": "integer" }
+        }
+      },
+      "ImportMentionLine": {
+        "type": "object",
+        "required": ["type", "id", "message_id", "from", "to", "excerpt", "created_at", "read_at"],
+        "properties": {
+          "type": { "const": "mention" },
+          "id": { "type": "string", "format": "uuid" },
+          "message_id": { "type": "string" },
+          "from": { "type": "string", "description": "Subject." },
+          "to": { "type": "string", "description": "Subject." },
+          "excerpt": { "type": "string", "maxLength": 200, "description": "Plaintext (re-sealed on import)." },
+          "created_at": { "$ref": "#/components/schemas/Timestamp" },
+          "read_at": { "type": ["string", "null"], "format": "date-time" }
+        }
+      },
+      "ImportUpdateLine": {
+        "type": "object",
+        "required": ["type", "b64"],
+        "properties": { "type": { "const": "update" }, "b64": { "type": "string", "contentEncoding": "base64", "description": "A lib0 v1 Yjs update, in original order (a snapshot first, as an update)." } }
+      },
+      "ImportEndLine": {
+        "type": "object",
+        "required": ["type", "updates", "members", "invites", "links", "mentions"],
+        "properties": {
+          "type": { "const": "end" },
+          "updates": { "type": "integer" }, "members": { "type": "integer" }, "invites": { "type": "integer" }, "links": { "type": "integer" }, "mentions": { "type": "integer" }
+        }
+      },
+      "ImportResult": {
+        "type": "object",
+        "required": ["canvas_id", "status", "updates_applied", "members", "invites", "links", "mentions", "digest"],
+        "properties": {
+          "canvas_id": { "type": "string", "format": "uuid" },
+          "status": { "type": "string", "enum": ["created", "replaced"] },
+          "updates_applied": { "type": "integer" },
+          "members": { "type": "integer" }, "invites": { "type": "integer" }, "links": { "type": "integer" }, "mentions": { "type": "integer" },
+          "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        }
+      },
+      "JsonRpcMessage": {
+        "type": "object",
+        "required": ["jsonrpc"],
+        "description": "A JSON-RPC 2.0 request (`id`, `method`, `params`), notification (no `id`) or response (`result` or `error`).",
+        "properties": {
+          "jsonrpc": { "const": "2.0" },
+          "id": { "type": ["string", "integer", "null"] },
+          "method": { "type": "string" },
+          "params": { "type": "object" },
+          "result": { "type": "object" },
+          "error": { "type": "object", "required": ["code", "message"], "properties": { "code": { "type": "integer" }, "message": { "type": "string" }, "data": {} } }
+        }
+      }
+    }
+  }
+}
