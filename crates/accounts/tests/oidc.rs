@@ -263,11 +263,13 @@ async fn confidential_client_es256_creates_a_user_in_an_allowed_domain() {
     let f = sign_in(&app, &idp, "corp", &claims, Signer::Es256).await;
     let (_, me2) = app.get("/v1/auth/me", &f["token"]).await;
     assert_eq!(me2["user"]["id"], me["user"]["id"]);
-    // States are single use and swept.
-    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM oidc_states WHERE expires_at < now()")
-        .fetch_one(app.db())
-        .await
-        .unwrap();
+    // States are single use and swept a day after they expire.
+    let left: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM oidc_states WHERE expires_at < now() - interval '1 day'",
+    )
+    .fetch_one(app.db())
+    .await
+    .unwrap();
     assert_eq!(left, 0);
 }
 

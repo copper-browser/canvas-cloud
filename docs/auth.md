@@ -273,7 +273,7 @@ Otherwise the page shows each canvas id with the API and MCP hints.
 | Table | Owner | What |
 |---|---|---|
 | `users`, `sessions`, `access_tokens`, `server_settings` | core (`0001`–`0099`) | accounts, `cvs_` sessions, `cvt_` tokens (SHA-256 digests only), `allow_signup` / `signup_domains` |
-| `oidc_states` | accounts (`0300_oidc_states.sql`) | sign-ins in flight: `state_sha256`, `provider`, `nonce`, `code_verifier`, `redirect_uri`, `expires_at`; swept on every start |
+| `oidc_states` | accounts (`0300_oidc_states.sql`) | sign-ins in flight: `state_sha256`, `provider`, `nonce`, `code_verifier`, `redirect_uri`, `expires_at`; swept on every start, a day after they expire |
 
 ## Metrics
 

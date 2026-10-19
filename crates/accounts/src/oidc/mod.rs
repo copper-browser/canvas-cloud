@@ -156,7 +156,10 @@ pub(crate) async fn start(
     let nonce = ids::random_token();
     let verifier = ids::random_token();
     let challenge = ids::b64url(&ids::sha256(verifier.as_bytes()));
-    sqlx::query("DELETE FROM oidc_states WHERE expires_at < now()")
+    // Rows outlive their expiry by a day so a late return still says "took too long"
+    // (`state_expired`) rather than "invalid"; it also keeps concurrent starts from
+    // sweeping a sign-in that is being answered right now.
+    sqlx::query("DELETE FROM oidc_states WHERE expires_at < now() - interval '1 day'")
         .execute(&state.db)
         .await?;
     sqlx::query(
