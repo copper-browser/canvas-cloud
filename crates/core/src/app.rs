@@ -1,19 +1,24 @@
-//! Router composition, `GET /v1/info`, the auth rate limiter and the CORS layer.
+//! Router composition, `GET /v1/info`, the static web root, the auth rate limiter and the
+//! CORS layer.
 
+use std::convert::Infallible;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::body::Body;
 use axum::extract::{OriginalUri, Request, State};
-use axum::http::{header, HeaderName, HeaderValue, Method};
+use axum::http::{header, HeaderName, HeaderValue, Method, StatusCode};
 use axum::middleware::{from_fn_with_state, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use governor::{DefaultKeyedRateLimiter, Quota, RateLimiter};
 use serde_json::{json, Map, Value};
+use tower::ServiceExt as _;
 use tower_http::cors::{AllowOrigin, CorsLayer};
+use tower_http::services::ServeDir;
 
 use crate::error::ApiError;
 use crate::state::SharedState;
@@ -84,7 +89,9 @@ struct InfoExtras {
 /// * `GET /healthz` → `ok`;
 /// * `/v1`: core `GET /v1/info` plus every [`Mounts::v1`] router; unknown `/v1` paths are a
 ///   JSON 404;
-/// * every [`Mounts::root`] router at the root; anything else is a JSON 404;
+/// * every [`Mounts::root`] router at the root;
+/// * with `web_root` configured, its files for any other GET/HEAD (see [`serve_web_root`]);
+///   anything else is a JSON 404;
 ///
 /// wrapped (innermost first) in the per-IP auth rate limiter, the CORS layer (only when
 /// `cors.allowed_origins` is non-empty) and request tracing/metrics (outermost).
@@ -116,9 +123,14 @@ pub fn app_with(state: SharedState, mounts: Mounts) -> Router {
         state.cfg.limits.auth_per_minute,
         state.cfg.trust_proxy,
     ));
-    let mut router = router
-        .fallback(not_found)
-        .layer(from_fn_with_state(limiter, auth_rate_limit));
+    let router = match &state.cfg.web_root {
+        Some(root) => {
+            let dir = ServeDir::new(root).append_index_html_on_directories(true);
+            router.fallback(move |req: Request| serve_web_root(dir.clone(), req))
+        }
+        None => router.fallback(not_found),
+    };
+    let mut router = router.layer(from_fn_with_state(limiter, auth_rate_limit));
     if let Some(cors) = cors_layer(&state.cfg.cors.allowed_origins) {
         router = router.layer(cors);
     }
@@ -136,8 +148,66 @@ pub async fn not_found() -> ApiError {
     ApiError::NotFound
 }
 
+/// Paths the web root never serves (they belong to the API, the agent seams and probes).
+fn reserved_path(path: &str) -> bool {
+    ["/v1", "/mcp", "/healthz"].iter().any(|p| {
+        path == *p
+            || path
+                .strip_prefix(p)
+                .is_some_and(|rest| rest.starts_with('/'))
+    })
+}
+
+/// The root fallback when `web_root` is set: GET/HEAD of any path no route claimed is served
+/// from the directory (`/` and directories → their `index.html`; never a listing; `..` and
+/// other escapes are refused by [`ServeDir`]; content types by extension). HTML answers carry
+/// `Cache-Control: no-cache` so a redeployed app is picked up at once. Other methods, the
+/// reserved prefixes and missing files are a JSON 404.
+pub async fn serve_web_root(dir: ServeDir, req: Request) -> Response {
+    if !matches!(*req.method(), Method::GET | Method::HEAD) || reserved_path(req.uri().path()) {
+        return ApiError::NotFound.into_response();
+    }
+    let res: Result<_, Infallible> = dir.oneshot(req).await;
+    let Ok(res) = res;
+    if matches!(
+        res.status(),
+        StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+    ) {
+        return ApiError::NotFound.into_response();
+    }
+    let mut res = res.map(Body::new);
+    let is_html = res
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("text/html"));
+    let headers = res.headers_mut();
+    if is_html {
+        headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    }
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    res
+}
+
+/// `GET /v1/info` — public. Clients (and a web app probing its own origin) learn what this
+/// server is and offers.
 async fn info(state: SharedState, extras: Arc<InfoExtras>) -> Result<Json<Value>, ApiError> {
     let signup = crate::identity::signup_allowed(&state.db).await?;
+    let oidc: Vec<Value> = state
+        .cfg
+        .oidc
+        .iter()
+        .map(|p| {
+            json!({
+                "id": p.id,
+                "name": p.label(),
+                "start": format!("/v1/auth/oidc/{}/start", p.id),
+            })
+        })
+        .collect();
     let mut limits = Map::new();
     limits.insert(
         "auth_per_minute".into(),
@@ -157,7 +227,13 @@ async fn info(state: SharedState, extras: Arc<InfoExtras>) -> Result<Json<Value>
     Ok(Json(json!({
         "name": "canvas-cloud",
         "version": env!("CARGO_PKG_VERSION"),
+        "public_url": state.cfg.public_url,
         "signup": signup,
+        "auth": { "password": true, "oidc": oidc },
+        "web": {
+            "root": state.cfg.web_root.is_some(),
+            "app_url": state.cfg.effective_web_app_url(),
+        },
         "features": extras.features,
         "limits": limits,
     })))
@@ -289,7 +365,6 @@ mod tests {
     use axum::http::StatusCode;
     use axum::routing::post;
     use http_body_util::BodyExt as _;
-    use tower::ServiceExt as _;
 
     use super::*;
 
@@ -387,6 +462,98 @@ mod tests {
             .await
             .unwrap();
         assert!(r.headers().get("access-control-allow-origin").is_none());
+    }
+
+    #[tokio::test]
+    async fn web_root_serves_files_as_the_root_fallback() {
+        let dir = std::env::temp_dir().join(format!("cvc-web-{}", crate::ids::uuid_v7()));
+        std::fs::create_dir_all(dir.join("assets")).unwrap();
+        std::fs::write(dir.join("index.html"), "<!doctype html><title>app</title>").unwrap();
+        std::fs::write(dir.join("assets/app.js"), "console.log(1)").unwrap();
+        std::fs::write(dir.join("assets/style.css"), "body{}").unwrap();
+        let secret = dir.with_extension("secret");
+        std::fs::write(&secret, "outside").unwrap();
+        let state = test_state(&[], 10);
+        let mut cfg = crate::config::Config::clone(&state.cfg);
+        cfg.web_root = Some(dir.clone());
+        let state = crate::state::AppState::new(state.db.clone(), cfg);
+        let app = app_with(state, mounts());
+        let get = |path: &str| {
+            let app = app.clone();
+            let req = Request::get(path).body(Body::empty()).unwrap();
+            async move { app.oneshot(req).await.unwrap() }
+        };
+
+        for path in ["/", "/index.html"] {
+            let r = get(path).await;
+            assert_eq!(r.status(), StatusCode::OK, "{path}");
+            assert!(r.headers()[header::CONTENT_TYPE]
+                .to_str()
+                .unwrap()
+                .starts_with("text/html"));
+            assert_eq!(r.headers()[header::CACHE_CONTROL], "no-cache");
+            assert_eq!(body(r).await, "<!doctype html><title>app</title>");
+        }
+        let r = get("/assets/app.js").await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert!(r.headers()[header::CONTENT_TYPE]
+            .to_str()
+            .unwrap()
+            .contains("javascript"));
+        assert!(r.headers().get(header::CACHE_CONTROL).is_none());
+        let r = get("/assets/style.css").await;
+        assert!(r.headers()[header::CONTENT_TYPE]
+            .to_str()
+            .unwrap()
+            .starts_with("text/css"));
+        let r = app
+            .clone()
+            .oneshot(Request::head("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+
+        // Unknown files, a directory without index.html (no listing), escapes, other
+        // methods and the reserved prefixes are JSON 404s; routes still win.
+        let escape = format!("/../{}", secret.file_name().unwrap().to_string_lossy());
+        for path in [
+            "/nope.js",
+            "/assets/",
+            escape.as_str(),
+            "/%2e%2e/etc/passwd",
+            "/mcp/x",
+            "/healthz/x",
+            "/v1/nope",
+        ] {
+            let r = get(path).await;
+            assert_eq!(r.status(), StatusCode::NOT_FOUND, "{path}");
+            let v: Value = serde_json::from_str(&body(r).await).unwrap();
+            assert_eq!(v["error"], "not_found", "{path}");
+        }
+        // A directory without its slash redirects to it (then index.html or 404).
+        let r = get("/assets").await;
+        assert_eq!(r.status(), StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(r.headers()[header::LOCATION], "/assets/");
+        let r = app
+            .clone()
+            .oneshot(Request::post("/index.html").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::NOT_FOUND);
+        assert_eq!(body(get("/llms.txt").await).await, "guide");
+        assert_eq!(body(get("/healthz").await).await, "ok");
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::remove_file(&secret).unwrap();
+    }
+
+    #[test]
+    fn reserved_paths() {
+        for p in ["/v1", "/v1/x", "/mcp", "/mcp/", "/healthz"] {
+            assert!(reserved_path(p), "{p}");
+        }
+        for p in ["/", "/v10", "/mcpx", "/index.html", "/healthzz"] {
+            assert!(!reserved_path(p), "{p}");
+        }
     }
 
     #[tokio::test]

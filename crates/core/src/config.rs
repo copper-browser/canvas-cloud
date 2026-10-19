@@ -91,8 +91,9 @@ pub struct OpsConfig {
     pub extra_url_schemes: Vec<String>,
 }
 
-/// One `[[oidc]]` provider (generic authorization code + PKCE). Parsed here so the human-auth
-/// routes can use it; the routes themselves live outside core.
+/// One `[[oidc]]` provider (generic authorization code + PKCE). Plain data: core only parses
+/// and validates it (and lists it in `GET /v1/info`); the human-auth routes
+/// (`/v1/auth/oidc/{id}/…`) live outside core.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -110,8 +111,19 @@ pub struct OidcProvider {
     /// Where the callback may send the browser back to (exact match).
     #[serde(default)]
     pub redirect_uris: Vec<String>,
-    /// Human label for buttons (defaults to `id`).
-    pub display_name: Option<String>,
+    /// Human label for sign-in buttons (defaults to `id`).
+    pub name: Option<String>,
+}
+
+impl OidcProvider {
+    /// [`Self::name`], else the id.
+    pub fn label(&self) -> &str {
+        self.name
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .unwrap_or(&self.id)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -150,9 +162,13 @@ pub struct Config {
     pub tls: TlsConfig,
     pub cors: CorsConfig,
     /// Where share-link landing pages (`/join/{token}`) send people, with a `{token}`
-    /// placeholder (appended when absent). `None` = a plain "open this link in your canvas
-    /// app" page.
+    /// placeholder (appended when absent). Unset: `{public_url}/#/join/{token}` when
+    /// [`Self::web_root`] is set, else a plain "open this link in your canvas app" page —
+    /// see [`Self::effective_web_app_url`].
     pub web_app_url: Option<String>,
+    /// A directory of static web-app files (e.g. a built canvas app with a self-contained
+    /// `index.html`) served at the root for every GET/HEAD path no route claims.
+    pub web_root: Option<PathBuf>,
     pub ops: OpsConfig,
     pub oidc: Vec<OidcProvider>,
     pub limits: Limits,
@@ -175,6 +191,7 @@ impl fmt::Debug for Config {
             .field("tls", &self.tls)
             .field("cors", &self.cors)
             .field("web_app_url", &self.web_app_url)
+            .field("web_root", &self.web_root)
             .field("ops", &self.ops)
             .field(
                 "oidc",
@@ -220,6 +237,7 @@ struct RawConfig {
     master_key: Option<String>,
     trust_proxy: Option<bool>,
     web_app_url: Option<String>,
+    web_root: Option<PathBuf>,
     metrics_listen: Option<String>,
     log_format: Option<LogFormat>,
     log_level: Option<String>,
@@ -285,6 +303,7 @@ const ENV_KEYS: &[(&str, Kind)] = &[
     ("master_key", Kind::Str),
     ("trust_proxy", Kind::Bool),
     ("web_app_url", Kind::Str),
+    ("web_root", Kind::Str),
     ("metrics_listen", Kind::Str),
     ("log_format", Kind::Str),
     ("log_level", Kind::Str),
@@ -544,6 +563,7 @@ impl Config {
             .filter(|s| !s.trim().is_empty())
             .map(|u| validate_web_app_url(&u))
             .transpose()?;
+        let web_root = raw.web_root.filter(|p| !p.as_os_str().is_empty());
         let mut seen = std::collections::HashSet::new();
         for p in &raw.oidc {
             validate_oidc(p)?;
@@ -562,6 +582,7 @@ impl Config {
             tls,
             cors,
             web_app_url,
+            web_root,
             ops,
             oidc: raw.oidc,
             limits,
@@ -595,6 +616,7 @@ impl Config {
             },
             cors: CorsConfig::default(),
             web_app_url: None,
+            web_root: None,
             ops: OpsConfig::default(),
             oidc: Vec::new(),
             limits: Limits::default(),
@@ -612,11 +634,37 @@ impl Config {
             .unwrap_or_else(|| "localhost".into())
     }
 
-    /// The share-link landing target for `token` (`web_app_url` with `{token}` substituted).
+    /// Where share links open, with a `{token}` placeholder: `web_app_url`, else
+    /// `{public_url}/#/join/{token}` (the served web app's join route) when `web_root` is set,
+    /// else `None`.
+    pub fn effective_web_app_url(&self) -> Option<String> {
+        self.web_app_url.clone().or_else(|| {
+            self.web_root
+                .as_ref()
+                .map(|_| format!("{}/#/join/{WEB_APP_TOKEN}", self.public_url))
+        })
+    }
+
+    /// The share-link landing target for `token` ([`Self::effective_web_app_url`] with
+    /// `{token}` substituted).
     pub fn web_app_link(&self, token: &str) -> Option<String> {
-        self.web_app_url
-            .as_deref()
+        self.effective_web_app_url()
             .map(|u| u.replace(WEB_APP_TOKEN, token))
+    }
+
+    /// `web_root` must be a directory holding `index.html` (checked by `serve` and `doctor`,
+    /// not at parse time, so a config can be validated away from its files).
+    pub fn check_web_root(&self) -> anyhow::Result<()> {
+        let Some(root) = &self.web_root else {
+            return Ok(());
+        };
+        if !root.is_dir() {
+            bail!("`web_root` {} is not a directory", root.display());
+        }
+        if !root.join("index.html").is_file() {
+            bail!("`web_root` {} has no index.html", root.display());
+        }
+        Ok(())
     }
 }
 
@@ -803,6 +851,11 @@ pub fn generate_toml(opts: &GenerateOptions) -> anyhow::Result<String> {
         "# Where /join/{token} share-link pages send people (e.g. a hosted canvas app).\n",
     );
     out.push_str("# web_app_url = \"https://canvas.example.com/join/{token}\"\n");
+    out.push_str(
+        "# Serve a built web app (a directory with index.html) at the root; share links then\n\
+         # open {public_url}/#/join/{token} unless web_app_url says otherwise.\n",
+    );
+    out.push_str("# web_root = \"/opt/canvas-app/dist/web\"\n");
     writeln!(out, "metrics_listen = {}", q(DEFAULT_METRICS_LISTEN))?;
     out.push_str("log_format = \"json\"\nlog_level = \"info\"\n\n");
     out.push_str("[tls]\n# \"self-signed\" | \"acme\" | \"off\" (off only on loopback or behind a TLS proxy)\n");
@@ -816,7 +869,7 @@ pub fn generate_toml(opts: &GenerateOptions) -> anyhow::Result<String> {
         writeln!(out, "acme_email = {}", q(e))?;
     }
     writeln!(out, "acme_cache_dir = {}\n", path_q(&opts.acme_cache_dir))?;
-    out.push_str("[cors]\n# Browser origins allowed to call the API, e.g. [\"https://canvas.example.com\"]\n");
+    out.push_str("[cors]\n# Other browser origins allowed to call the API (the web_root app is same-origin\n# and needs none), e.g. [\"http://localhost:5173\", \"http://127.0.0.1:5173\"]\n");
     out.push_str("allowed_origins = []\n\n");
     out.push_str("[ops]\n# URL schemes accepted in link shapes besides http, https and mailto\n");
     out.push_str("extra_url_schemes = []\n\n");
@@ -950,6 +1003,50 @@ mod tests {
     }
 
     #[test]
+    fn web_root_defaults_the_share_link_target() {
+        let c = Config::from_toml_str(
+            &format!("web_root = \"/srv/canvas-app\"\n{BASE}"),
+            &env(&[]),
+        )
+        .unwrap();
+        assert_eq!(c.web_root.as_deref(), Some(Path::new("/srv/canvas-app")));
+        assert_eq!(
+            c.effective_web_app_url().as_deref(),
+            Some("https://canvas.example.com:8443/#/join/{token}")
+        );
+        assert_eq!(
+            c.web_app_link("T").as_deref(),
+            Some("https://canvas.example.com:8443/#/join/T")
+        );
+        // An explicit web_app_url wins; env sets web_root too.
+        let c = Config::from_toml_str(
+            &format!("web_app_url = \"https://app.example.com/j/{{token}}\"\n{BASE}"),
+            &env(&[("CANVAS_CLOUD_WEB_ROOT", "/srv/web")]),
+        )
+        .unwrap();
+        assert_eq!(c.web_root.as_deref(), Some(Path::new("/srv/web")));
+        assert_eq!(
+            c.web_app_link("T").as_deref(),
+            Some("https://app.example.com/j/T")
+        );
+        // Neither: no target.
+        let c = Config::from_toml_str(BASE, &env(&[])).unwrap();
+        assert_eq!(c.web_app_link("T"), None);
+        // check_web_root wants a directory with index.html.
+        let mut c = Config::for_tests("postgres://localhost/x");
+        assert!(c.check_web_root().is_ok());
+        let dir = std::env::temp_dir().join(format!("cvc-web-root-{}", crate::ids::uuid_v7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        c.web_root = Some(dir.clone());
+        assert!(c.check_web_root().is_err());
+        std::fs::write(dir.join("index.html"), "<!doctype html>").unwrap();
+        assert!(c.check_web_root().is_ok());
+        c.web_root = Some(dir.join("index.html"));
+        assert!(c.check_web_root().is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn rejects_bad_values() {
         let bad_bool = Config::from_toml_str(BASE, &env(&[("CANVAS_CLOUD_TRUST_PROXY", "maybe")]));
         assert!(bad_bool.is_err());
@@ -992,8 +1089,20 @@ mod tests {
         let c = Config::from_toml_str(&text, &env(&[])).unwrap();
         assert_eq!(c.oidc.len(), 1);
         assert_eq!(c.oidc[0].id, "google");
+        assert_eq!(c.oidc[0].label(), "google");
+        assert_eq!(c.oidc[0].allowed_domains, ["example.com"]);
         let bad = text.replace("\"google\"", "\"Goo gle\"");
         assert!(Config::from_toml_str(&bad, &env(&[])).is_err());
+        let named = format!(
+            "{text}name = \"Google\"\nclient_secret_file = \"/etc/canvas-cloud/google.secret\"\nredirect_uris = [\"https://canvas.example.com/\"]\n"
+        );
+        let c = Config::from_toml_str(&named, &env(&[])).unwrap();
+        assert_eq!(c.oidc[0].label(), "Google");
+        assert_eq!(c.oidc[0].redirect_uris, ["https://canvas.example.com/"]);
+        assert!(c.oidc[0].client_secret_file.is_some());
+        // Unknown keys are refused (typos would silently weaken a sign-in policy).
+        let typo = format!("{text}allowed_domain = [\"x.com\"]\n");
+        assert!(Config::from_toml_str(&typo, &env(&[])).is_err());
     }
 
     #[test]

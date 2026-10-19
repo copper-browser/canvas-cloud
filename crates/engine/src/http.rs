@@ -407,39 +407,29 @@ pub(crate) async fn mark_read(
 // ---------------------------------------------------------------------------------------------
 // Share-link landing page (outside `/v1`)
 
-fn escape_html(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
-}
+const LANDING_STYLE: &str = "body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f7f7f5;color:#171717;font:16px system-ui,sans-serif}main{max-width:28rem;padding:2rem;text-align:center}";
 
-const LANDING_STYLE: &str = "body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f7f7f5;color:#171717;font:16px system-ui,sans-serif}main{max-width:28rem;padding:2rem;text-align:center}a{display:inline-block;padding:.75rem 1.1rem;border-radius:.5rem;background:#171717;color:#fff;text-decoration:none}a:focus-visible{outline:3px solid #6d5dfc;outline-offset:3px}";
-
-/// The landing page for a share link someone opened in a browser. It never consults the
-/// database (the token is a credential; this page is unauthenticated). With `web_app_url`
-/// configured, a well-formed token is handed to that web app (`{token}` substituted; meta
-/// refresh plus a link); otherwise, or for a malformed token, a plain "open this link in your
-/// canvas app" page.
+/// `GET /join/{token}` — a share link someone opened in a browser. It never consults the
+/// database (the token is a credential; this route is unauthenticated). When share links
+/// have a web target (`web_app_url`, or `{public_url}/#/join/{token}` with `web_root`), a
+/// well-formed token is redirected there (`302`); otherwise, or for a malformed token, a
+/// plain "open this link in your canvas app" page. Never cached, never sends a referrer.
 pub(crate) async fn join_landing(
     State(state): State<SharedState>,
     Path(token): Path<String>,
 ) -> Response {
     let target = rest::token_digest(&token).and_then(|_| state.cfg.web_app_link(&token));
-    let html = match target {
-        Some(href) => {
-            let href = escape_html(&href);
-            format!(
-                "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta http-equiv=\"refresh\" content=\"0;url={href}\"><title>Open shared canvas</title><style>{LANDING_STYLE}</style></head><body><main><h1>Canvas share link</h1><p>Opening the canvas…</p><a href=\"{href}\">Open the canvas</a></main></body></html>"
-            )
+    let mut response = match target.and_then(|t| HeaderValue::from_str(&t).ok()) {
+        Some(location) => {
+            let mut r = StatusCode::FOUND.into_response();
+            r.headers_mut().insert(header::LOCATION, location);
+            r
         }
-        None => format!(
+        None => Html(format!(
             "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Open shared canvas</title><style>{LANDING_STYLE}</style></head><body><main><h1>Canvas share link</h1><p>Open this link in your canvas app to continue.</p></main></body></html>"
-        ),
+        ))
+        .into_response(),
     };
-    let mut response = Html(html).into_response();
     let headers = response.headers_mut();
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     headers.insert(

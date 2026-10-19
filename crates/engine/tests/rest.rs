@@ -817,6 +817,13 @@ async fn share_links_people_and_landing() {
 
 /// `GET /join/{token}` through the app: checks the hardening headers, returns the HTML.
 async fn landing(app: &TestApp, token: &str) -> String {
+    let response = landing_response(app, token).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    String::from_utf8(body.to_vec()).unwrap()
+}
+
+async fn landing_response(app: &TestApp, token: &str) -> axum::response::Response {
     let req = Request::builder()
         .method(Method::GET)
         .uri(format!("/join/{token}"))
@@ -824,7 +831,6 @@ async fn landing(app: &TestApp, token: &str) -> String {
         .body(Body::empty())
         .unwrap();
     let response = app.router.clone().oneshot(req).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()["cache-control"], "no-store");
     assert_eq!(response.headers()["referrer-policy"], "no-referrer");
     assert_eq!(response.headers()["x-content-type-options"], "nosniff");
@@ -832,31 +838,52 @@ async fn landing(app: &TestApp, token: &str) -> String {
         response.headers()["content-security-policy"],
         "default-src 'none'; style-src 'unsafe-inline'"
     );
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    String::from_utf8(body.to_vec()).unwrap()
+    response
 }
 
-#[tokio::test]
-async fn join_landing_hands_the_token_to_the_web_app() {
-    let app = TestApp::with(|cfg| {
-        cfg.web_app_url = Some("https://canvas.example.test/join?t={token}&x=1".into());
-    })
-    .await;
+async fn share_token(app: &TestApp) -> String {
     let owner = app.user("lander").await;
     let id = app.canvas(&owner, "Landing").await;
     let (s, link) = app
         .post(&owner, &format!("/canvases/{id}/links"), json!({}))
         .await;
     assert_eq!(s, StatusCode::CREATED, "{link}");
-    let token = link["token"].as_str().unwrap();
-    let html = landing(&app, token).await;
-    let href = format!("https://canvas.example.test/join?t={token}&amp;x=1");
-    assert!(html.contains(&format!("href=\"{href}\"")), "{html}");
-    assert!(html.contains(&format!("url={href}")), "{html}");
+    link["token"].as_str().unwrap().to_owned()
+}
+
+#[tokio::test]
+async fn join_landing_redirects_to_the_web_app() {
+    let app = TestApp::with(|cfg| {
+        cfg.web_app_url = Some("https://canvas.example.test/join?t={token}&x=1".into());
+    })
+    .await;
+    let token = share_token(&app).await;
+    let response = landing_response(&app, &token).await;
+    assert_eq!(response.status(), StatusCode::FOUND);
+    assert_eq!(
+        response.headers()["location"],
+        format!("https://canvas.example.test/join?t={token}&x=1").as_str()
+    );
     // A malformed token is not forwarded; markup in it is never echoed.
     let html = landing(&app, "%3Cbad%3E").await;
     assert!(!html.contains("canvas.example.test"));
     assert!(!html.contains("<bad>"));
+}
+
+#[tokio::test]
+async fn join_landing_defaults_to_the_served_web_root() {
+    let app = TestApp::with(|cfg| {
+        cfg.public_url = "https://canvas.example.test".into();
+        cfg.web_root = Some(std::env::temp_dir());
+    })
+    .await;
+    let token = share_token(&app).await;
+    let response = landing_response(&app, &token).await;
+    assert_eq!(response.status(), StatusCode::FOUND);
+    assert_eq!(
+        response.headers()["location"],
+        format!("https://canvas.example.test/#/join/{token}").as_str()
+    );
 }
 
 fn urlencode(s: &str) -> String {

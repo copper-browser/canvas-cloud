@@ -279,19 +279,21 @@ pub struct SignupPolicy {
     /// `signup_domains`: when non-empty, only emails in these domains (lower-case) may sign
     /// up.
     pub signup_domains: Vec<String>,
-    /// No user exists yet: the first account may always be created.
+    /// No password account exists yet (users provisioned by apps or OIDC do not count): the
+    /// first one may always be created, so a fresh server can be claimed.
     pub first_user: bool,
 }
 
 impl SignupPolicy {
     pub async fn load(db: &sqlx::PgPool) -> ApiResult<Self> {
-        let (has_users, allow, domains): (bool, Option<Value>, Option<Value>) = sqlx::query_as(
-            "SELECT EXISTS (SELECT 1 FROM users),
+        let (has_password_users, allow, domains): (bool, Option<Value>, Option<Value>) =
+            sqlx::query_as(
+                "SELECT EXISTS (SELECT 1 FROM users WHERE password_hash IS NOT NULL),
                     (SELECT value FROM server_settings WHERE key = 'allow_signup'),
                     (SELECT value FROM server_settings WHERE key = 'signup_domains')",
-        )
-        .fetch_one(db)
-        .await?;
+            )
+            .fetch_one(db)
+            .await?;
         Ok(Self {
             allow_signup: allow.and_then(|v| v.as_bool()).unwrap_or(false),
             signup_domains: domains
@@ -302,7 +304,7 @@ impl SignupPolicy {
                 .map(|d| d.trim().trim_start_matches('@').to_ascii_lowercase())
                 .filter(|d| !d.is_empty())
                 .collect(),
-            first_user: !has_users,
+            first_user: !has_password_users,
         })
     }
 
