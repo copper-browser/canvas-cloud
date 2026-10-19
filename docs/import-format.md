@@ -142,7 +142,9 @@ provisioned is rejected with `422 unknown_subject`.
      this server's KEK, and records `imported_by_app` and `imported_at`.
    * It inserts the members, invites, links and mentions.
    * It writes **one** compacted, sealed snapshot of the document (`encode_state_as_update_v1`)
-     with no update log.
+     with no update log. The snapshot is verified first: re-applied to a fresh document it
+     must give the same state vector and digest (garbage-collected if that verifies, else
+     uncollected). If neither verifies the import fails with `422 unverifiable_snapshot`.
 
    Any error anywhere aborts the whole import, and nothing is stored.
 3. **After the commit:**
@@ -226,6 +228,7 @@ single line also has `line`.
 | 422 | `bad_update` | an update that is not base64, not a v1 update, or that yrs rejects |
 | 422 | `count_mismatch` | the `end` counts differ from the lines sent |
 | 422 | `incomplete_history` | the updates leave pending structs or a gap |
+| 422 | `unverifiable_snapshot` | no snapshot encoding re-applies to the same document (yrs 0.28 cannot encode some texts split inside a UTF-16 surrogate pair); keep the source data and report it |
 
 After most errors the server reads the rest of the body, up to the limit, before it answers,
 so a streaming client sees the status rather than a reset. The exceptions are a `413` and a
