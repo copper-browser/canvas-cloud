@@ -18,7 +18,11 @@ pub(crate) enum Error {
 }
 
 impl Error {
-    pub(crate) fn coded(status: StatusCode, code: &'static str, message: impl Into<String>) -> Self {
+    pub(crate) fn coded(
+        status: StatusCode,
+        code: &'static str,
+        message: impl Into<String>,
+    ) -> Self {
         Self::Coded {
             status,
             code,

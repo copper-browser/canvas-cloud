@@ -220,7 +220,10 @@ fn error_page(cfg: &Config, message: &str) -> Response {
     );
     let mut resp = (StatusCode::BAD_REQUEST, html).into_response();
     let h = resp.headers_mut();
-    h.insert(CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"));
+    h.insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
     h.insert(
         "content-security-policy",
         HeaderValue::from_static(
@@ -317,7 +320,17 @@ pub(crate) async fn callback(
             "the provider sent no authorization code",
         )));
     };
-    match complete(&state, &shared, p, &code, &nonce, &verifier, user_agent(&headers)).await {
+    match complete(
+        &state,
+        &shared,
+        p,
+        &code,
+        &nonce,
+        &verifier,
+        user_agent(&headers),
+    )
+    .await
+    {
         Ok((user_id, token)) => {
             tracing::Span::current().record("user_id", tracing::field::display(user_id));
             tracing::info!(provider = %p.id, user_id = %user_id, "OIDC sign-in");
@@ -402,7 +415,12 @@ async fn complete(
         .email
         .as_deref()
         .and_then(|e| account_email(e).ok())
-        .ok_or_else(|| Fail::new("email_missing", "the provider did not share an email address"))?;
+        .ok_or_else(|| {
+            Fail::new(
+                "email_missing",
+                "the provider did not share an email address",
+            )
+        })?;
     if !claims.email_verified() {
         return Err(Fail::new(
             "email_not_verified",
@@ -481,7 +499,10 @@ mod tests {
             redirects,
             domains
         );
-        Config::from_toml_str(&toml, &|_| None).unwrap().oidc.remove(0)
+        Config::from_toml_str(&toml, &|_| None)
+            .unwrap()
+            .oidc
+            .remove(0)
     }
 
     #[test]
@@ -491,14 +512,38 @@ mod tests {
         assert!(redirect_allowed(public, &p, "myapp://signed-in"));
         assert!(redirect_allowed(public, &p, "https://app.example.org/cb"));
         assert!(!redirect_allowed(public, &p, "https://app.example.org/cb/"));
-        assert!(!redirect_allowed(public, &p, "https://app.example.org/other"));
+        assert!(!redirect_allowed(
+            public,
+            &p,
+            "https://app.example.org/other"
+        ));
         assert!(redirect_allowed(public, &p, "https://canvas.example.com/"));
-        assert!(redirect_allowed(public, &p, "https://canvas.example.com/account"));
-        assert!(!redirect_allowed(public, &p, "https://canvas.example.com/#x"));
+        assert!(redirect_allowed(
+            public,
+            &p,
+            "https://canvas.example.com/account"
+        ));
+        assert!(!redirect_allowed(
+            public,
+            &p,
+            "https://canvas.example.com/#x"
+        ));
         assert!(!redirect_allowed(public, &p, "http://canvas.example.com/"));
-        assert!(!redirect_allowed(public, &p, "https://canvas.example.com:8443/"));
-        assert!(!redirect_allowed(public, &p, "https://evil@canvas.example.com/"));
-        assert!(!redirect_allowed(public, &p, "https://canvas.example.com.evil.org/"));
+        assert!(!redirect_allowed(
+            public,
+            &p,
+            "https://canvas.example.com:8443/"
+        ));
+        assert!(!redirect_allowed(
+            public,
+            &p,
+            "https://evil@canvas.example.com/"
+        ));
+        assert!(!redirect_allowed(
+            public,
+            &p,
+            "https://canvas.example.com.evil.org/"
+        ));
         assert!(!redirect_allowed(public, &p, "javascript:alert(1)"));
         assert!(!redirect_allowed(public, &p, ""));
     }
@@ -515,9 +560,16 @@ mod tests {
         };
         let any = provider(&[], &[]);
         assert!(may_create(&any, &open, "a@x.org"));
-        assert!(!may_create(&any, &closed_first, "a@x.org"), "no first-user rule");
+        assert!(
+            !may_create(&any, &closed_first, "a@x.org"),
+            "no first-user rule"
+        );
         let corp = provider(&[], &["@Corp.example"]);
-        assert!(may_create(&corp, &SignupPolicy::default(), "a@corp.example"));
+        assert!(may_create(
+            &corp,
+            &SignupPolicy::default(),
+            "a@corp.example"
+        ));
         assert!(!may_create(&corp, &SignupPolicy::default(), "a@x.org"));
         let narrowed = SignupPolicy {
             allow_signup: true,

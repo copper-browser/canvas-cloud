@@ -58,7 +58,11 @@ async fn first_account_then_closed_then_open_then_domains() {
     assert!(info_signup(&app).await);
     // …and is never claimed by a signup with its email.
     let (s, v) = signup(&app, &fed).await;
-    assert_eq!((s, v["error"].as_str()), (StatusCode::CONFLICT, Some("email_taken")), "{v}");
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (StatusCode::CONFLICT, Some("email_taken")),
+        "{v}"
+    );
 
     // The first password account: 201 {token, user}.
     let first = unique_email("First", "Example.TEST");
@@ -69,29 +73,52 @@ async fn first_account_then_closed_then_open_then_domains() {
     assert_eq!(v["user"]["display_name"], "New Person");
     assert_eq!(v["user"].as_object().unwrap().len(), 4);
     let (s, me) = app.get("/v1/auth/me", v["token"].as_str().unwrap()).await;
-    assert_eq!((s, me["via"]["kind"].as_str()), (StatusCode::OK, Some("session")));
+    assert_eq!(
+        (s, me["via"]["kind"].as_str()),
+        (StatusCode::OK, Some("session"))
+    );
     assert_eq!(app.login(&first, PASSWORD).await.0, StatusCode::OK);
 
     // Now closed (allow_signup defaults to false).
     assert!(!info_signup(&app).await);
     let (s, v) = signup(&app, &unique_email("second", "example.test")).await;
-    assert_eq!((s, v["error"].as_str()), (StatusCode::FORBIDDEN, Some("signup_closed")));
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (StatusCode::FORBIDDEN, Some("signup_closed"))
+    );
     // Taken emails are a 409 only once the policy lets the caller sign up at all.
     let (s, v) = signup(&app, &first).await;
-    assert_eq!((s, v["error"].as_str()), (StatusCode::FORBIDDEN, Some("signup_closed")));
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (StatusCode::FORBIDDEN, Some("signup_closed"))
+    );
 
     // Open.
-    set_setting(app.db(), "allow_signup", &json!(true)).await.unwrap();
+    set_setting(app.db(), "allow_signup", &json!(true))
+        .await
+        .unwrap();
     assert!(info_signup(&app).await);
     let (s, _) = signup(&app, &unique_email("second", "example.test")).await;
     assert_eq!(s, StatusCode::CREATED);
     let (s, v) = signup(&app, &first.to_uppercase()).await;
-    assert_eq!((s, v["error"].as_str()), (StatusCode::CONFLICT, Some("email_taken")));
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (StatusCode::CONFLICT, Some("email_taken"))
+    );
 
     // Narrowed to domains.
-    set_setting(app.db(), "signup_domains", &json!(["@Corp.Test", "ok.test"])).await.unwrap();
+    set_setting(
+        app.db(),
+        "signup_domains",
+        &json!(["@Corp.Test", "ok.test"]),
+    )
+    .await
+    .unwrap();
     let (s, v) = signup(&app, &unique_email("third", "elsewhere.test")).await;
-    assert_eq!((s, v["error"].as_str()), (StatusCode::FORBIDDEN, Some("signup_domain_not_allowed")));
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (StatusCode::FORBIDDEN, Some("signup_domain_not_allowed"))
+    );
     let (s, _) = signup(&app, &unique_email("third", "sub.corp.test")).await;
     assert_eq!(s, StatusCode::FORBIDDEN, "subdomains are not included");
     for domain in ["corp.test", "OK.test"] {
@@ -101,10 +128,22 @@ async fn first_account_then_closed_then_open_then_domains() {
 
     // Validation (whatever the policy).
     for (body, what) in [
-        (json!({ "email": "not-an-email", "password": PASSWORD }), "email"),
-        (json!({ "email": unique_email("v", "ok.test"), "password": "short" }), "short password"),
-        (json!({ "email": unique_email("v", "ok.test"), "password": "x".repeat(257) }), "long password"),
-        (json!({ "email": unique_email("v", "ok.test") }), "no password"),
+        (
+            json!({ "email": "not-an-email", "password": PASSWORD }),
+            "email",
+        ),
+        (
+            json!({ "email": unique_email("v", "ok.test"), "password": "short" }),
+            "short password",
+        ),
+        (
+            json!({ "email": unique_email("v", "ok.test"), "password": "x".repeat(257) }),
+            "long password",
+        ),
+        (
+            json!({ "email": unique_email("v", "ok.test") }),
+            "no password",
+        ),
     ] {
         let (s, v) = app.post("/v1/auth/signup", None, body).await;
         assert_eq!(s, StatusCode::BAD_REQUEST, "{what}: {v}");
@@ -144,9 +183,14 @@ async fn concurrent_first_signups_admit_exactly_one() {
     for t in tasks {
         statuses.push(t.await.unwrap());
     }
-    let created = statuses.iter().filter(|s| **s == StatusCode::CREATED).count();
+    let created = statuses
+        .iter()
+        .filter(|s| **s == StatusCode::CREATED)
+        .count();
     assert_eq!(created, 1, "{statuses:?}");
-    assert!(statuses.iter().all(|s| *s == StatusCode::CREATED || *s == StatusCode::FORBIDDEN));
+    assert!(statuses
+        .iter()
+        .all(|s| *s == StatusCode::CREATED || *s == StatusCode::FORBIDDEN));
 }
 
 #[tokio::test]
@@ -172,9 +216,20 @@ async fn oidc_signup_follows_the_settings_but_not_the_first_user_rule() {
                 .send()
                 .await
                 .unwrap();
-            let cookie = resp.headers()["set-cookie"].to_str().unwrap().split(';').next().unwrap().to_owned();
+            let cookie = resp.headers()["set-cookie"]
+                .to_str()
+                .unwrap()
+                .split(';')
+                .next()
+                .unwrap()
+                .to_owned();
             let authorize = url::Url::parse(resp.headers()["location"].to_str().unwrap()).unwrap();
-            let state = authorize.query_pairs().find(|(k, _)| k == "state").unwrap().1.into_owned();
+            let state = authorize
+                .query_pairs()
+                .find(|(k, _)| k == "state")
+                .unwrap()
+                .1
+                .into_owned();
             let code = idp.issue(&authorize, &json!({ "email": email }), Signer::Es256);
             let resp = app
                 .http
@@ -194,14 +249,20 @@ async fn oidc_signup_follows_the_settings_but_not_the_first_user_rule() {
     // Empty instance: OIDC does not get the first-account pass.
     let f = sign_in(unique_email("a", "example.test")).await;
     assert_eq!(f["error"], "signup_closed");
-    set_setting(app.db(), "allow_signup", &json!(true)).await.unwrap();
-    set_setting(app.db(), "signup_domains", &json!(["ok.test"])).await.unwrap();
+    set_setting(app.db(), "allow_signup", &json!(true))
+        .await
+        .unwrap();
+    set_setting(app.db(), "signup_domains", &json!(["ok.test"]))
+        .await
+        .unwrap();
     let f = sign_in(unique_email("a", "example.test")).await;
     assert_eq!(f["error"], "signup_closed");
     let f = sign_in(unique_email("a", "ok.test")).await;
     assert!(f["token"].starts_with("cvs_"), "{f:?}");
     // That (password-less) OIDC account does not use up password signup's "first account".
-    set_setting(app.db(), "allow_signup", &json!(false)).await.unwrap();
+    set_setting(app.db(), "allow_signup", &json!(false))
+        .await
+        .unwrap();
     assert!(info_signup(&app).await);
     let (s, v) = signup(&app, &unique_email("first", "anywhere.test")).await;
     assert_eq!(s, StatusCode::CREATED, "{v}");

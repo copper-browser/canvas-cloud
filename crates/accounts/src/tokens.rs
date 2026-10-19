@@ -44,7 +44,9 @@ pub(crate) struct CreateToken {
 }
 
 fn require_session(user: &AuthUser) -> Result<()> {
-    user.session_id().map(|_| ()).ok_or_else(|| session_required().into())
+    user.session_id()
+        .map(|_| ())
+        .ok_or_else(|| session_required().into())
 }
 
 /// `GET /v1/tokens` → `{tokens: [{id, name, scope, created_at, last_used_at, expires_at}],

@@ -145,7 +145,10 @@ pub(crate) async fn signup(
     check_signup_policy(&SignupPolicy::load(&state.db).await?, &email)?;
     // An existing user — including a password-less one a linked app provisioned — is never
     // claimed by a signup (that would hand their canvases to whoever typed the email).
-    if identity::user_id_by_email(&state.db, &email).await?.is_some() {
+    if identity::user_id_by_email(&state.db, &email)
+        .await?
+        .is_some()
+    {
         return Err(email_taken());
     }
     let hash = identity::hash_password(req.password).await?;
@@ -345,7 +348,10 @@ mod tests {
 
     #[test]
     fn emails_are_lower_cased_and_validated() {
-        assert_eq!(account_email(" Ann@Example.COM ").unwrap(), "ann@example.com");
+        assert_eq!(
+            account_email(" Ann@Example.COM ").unwrap(),
+            "ann@example.com"
+        );
         for bad in ["", "ann", "ann@", "@x.io", "a b@c.io", "a@b"] {
             assert!(account_email(bad).is_err(), "{bad}");
         }

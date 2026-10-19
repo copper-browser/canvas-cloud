@@ -126,7 +126,13 @@ impl MockIdp {
         self.issue_inner(authorize, &json!({}), Signer::Es256, true)
     }
 
-    fn issue_inner(&self, authorize: &Url, overrides: &Value, signer: Signer, fail: bool) -> String {
+    fn issue_inner(
+        &self,
+        authorize: &Url,
+        overrides: &Value,
+        signer: Signer,
+        fail: bool,
+    ) -> String {
         let q: HashMap<String, String> = authorize.query_pairs().into_owned().collect();
         assert_eq!(q["response_type"], "code");
         assert_eq!(q["code_challenge_method"], "S256");
@@ -222,8 +228,7 @@ async fn token(
         id
     } else if let Some(secret) = form.get("client_secret") {
         inner.auth_seen.lock().unwrap().push("post".into());
-        if form.get("client_id").map(String::as_str) != Some(CLIENT_ID) || secret != CLIENT_SECRET
-        {
+        if form.get("client_id").map(String::as_str) != Some(CLIENT_ID) || secret != CLIENT_SECRET {
             return token_error(StatusCode::UNAUTHORIZED, "invalid_client");
         }
         CLIENT_ID.to_owned()

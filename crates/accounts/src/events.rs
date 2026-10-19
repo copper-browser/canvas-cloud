@@ -73,7 +73,10 @@ fn local_id(base: u64, wire: u64) -> Option<u64> {
 
 /// Buffered envelopes after `after`, the id they reach, and a tap receiver positioned right
 /// after them; `None` when `after` is no longer (or was never) buffered.
-fn subscribe_after(events: &Events, after: u64) -> Option<(Vec<Envelope>, u64, Receiver<Envelope>)> {
+fn subscribe_after(
+    events: &Events,
+    after: u64,
+) -> Option<(Vec<Envelope>, u64, Receiver<Envelope>)> {
     match events.resume(after) {
         (Resume::Replay(replay), rx) => {
             let reached = replay.last().map_or(after, |e| e.id);
@@ -264,7 +267,11 @@ mod tests {
         assert_eq!(requested_resume(&h, Some("7")), ResumeFrom::After(7));
         assert_eq!(requested_resume(&h, Some(" ")), ResumeFrom::Now);
         h.insert("last-event-id", HeaderValue::from_static("12"));
-        assert_eq!(requested_resume(&h, Some("7")), ResumeFrom::After(12), "header wins");
+        assert_eq!(
+            requested_resume(&h, Some("7")),
+            ResumeFrom::After(12),
+            "header wins"
+        );
         h.insert("last-event-id", HeaderValue::from_static("nope"));
         assert_eq!(requested_resume(&h, None), ResumeFrom::Invalid);
     }

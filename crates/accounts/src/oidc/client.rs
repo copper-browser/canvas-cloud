@@ -234,7 +234,9 @@ impl Cache {
         match secret {
             // RFC 6749 §2.3.1: Basic credentials are form-urlencoded first.
             Some(secret) if methods.is_none() || supports("client_secret_basic") => {
-                let enc = |s: &str| url::form_urlencoded::byte_serialize(s.as_bytes()).collect::<String>();
+                let enc = |s: &str| {
+                    url::form_urlencoded::byte_serialize(s.as_bytes()).collect::<String>()
+                };
                 req = req.basic_auth(enc(&p.client_id), Some(enc(secret)));
             }
             Some(secret) => {

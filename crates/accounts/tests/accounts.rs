@@ -65,12 +65,20 @@ async fn login_is_uniform_and_enumeration_safe() {
         .await
         .unwrap();
     let (s, v) = app.login(&ann.email, "wrong password here").await;
-    assert_eq!((s, v["error"].as_str()), (StatusCode::UNAUTHORIZED, Some("invalid_credentials")));
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (StatusCode::UNAUTHORIZED, Some("invalid_credentials"))
+    );
     let (s, v) = app.login(&ann.email, PASSWORD).await;
-    assert_eq!((s, v["error"].as_str()), (StatusCode::UNAUTHORIZED, Some("account_disabled")));
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (StatusCode::UNAUTHORIZED, Some("account_disabled"))
+    );
 
     // Malformed bodies are 400s.
-    let (s, _) = app.post("/v1/auth/login", None, json!({ "email": "a@b.co" })).await;
+    let (s, _) = app
+        .post("/v1/auth/login", None, json!({ "email": "a@b.co" }))
+        .await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
 }
 
@@ -92,7 +100,13 @@ async fn me_reports_how_the_caller_authenticated() {
 
     let (app_id, key) = app.app_for(bea.id, "subject-bea").await;
     let (s, v) = app
-        .call_with(Method::GET, "/v1/auth/me", Some(&key), None, &[("x-canvas-user", "subject-bea")])
+        .call_with(
+            Method::GET,
+            "/v1/auth/me",
+            Some(&key),
+            None,
+            &[("x-canvas-user", "subject-bea")],
+        )
         .await;
     assert_eq!(s, StatusCode::OK, "{v}");
     assert_eq!(v["via"], json!({ "kind": "app", "app_id": app_id }));
@@ -100,26 +114,56 @@ async fn me_reports_how_the_caller_authenticated() {
 
     // PATCH display_name (any write-capable credential).
     let (s, v) = app
-        .call(Method::PATCH, "/v1/auth/me", Some(&bea.token), Some(json!({ "display_name": "  Bea B. " })))
+        .call(
+            Method::PATCH,
+            "/v1/auth/me",
+            Some(&bea.token),
+            Some(json!({ "display_name": "  Bea B. " })),
+        )
         .await;
     assert_eq!(s, StatusCode::OK, "{v}");
     assert_eq!(v["user"]["display_name"], "Bea B.");
     assert_eq!(v["via"]["kind"], "session");
     let (s, v) = app
-        .call(Method::PATCH, "/v1/auth/me", Some(&write), Some(json!({ "display_name": "Bea" })))
+        .call(
+            Method::PATCH,
+            "/v1/auth/me",
+            Some(&write),
+            Some(json!({ "display_name": "Bea" })),
+        )
         .await;
-    assert_eq!((s, v["user"]["display_name"].as_str()), (StatusCode::OK, Some("Bea")));
-    for bad in [json!({ "display_name": "   " }), json!({}), json!({ "display_name": "x".repeat(201) })] {
-        let (s, v) = app.call(Method::PATCH, "/v1/auth/me", Some(&bea.token), Some(bad)).await;
+    assert_eq!(
+        (s, v["user"]["display_name"].as_str()),
+        (StatusCode::OK, Some("Bea"))
+    );
+    for bad in [
+        json!({ "display_name": "   " }),
+        json!({}),
+        json!({ "display_name": "x".repeat(201) }),
+    ] {
+        let (s, v) = app
+            .call(Method::PATCH, "/v1/auth/me", Some(&bea.token), Some(bad))
+            .await;
         assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
     }
     let (s, v) = app
-        .call(Method::PATCH, "/v1/auth/me", Some(&read), Some(json!({ "display_name": "nope" })))
+        .call(
+            Method::PATCH,
+            "/v1/auth/me",
+            Some(&read),
+            Some(json!({ "display_name": "nope" })),
+        )
         .await;
-    assert_eq!((s, v["error"].as_str()), (StatusCode::FORBIDDEN, Some("read_only_token")));
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (StatusCode::FORBIDDEN, Some("read_only_token"))
+    );
 
     let (s, v) = app.call(Method::GET, "/v1/auth/me", None, None).await;
-    assert_eq!((s, v["error"].as_str()), (StatusCode::UNAUTHORIZED, Some("unauthorized")));
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (StatusCode::UNAUTHORIZED, Some("unauthorized"))
+    );
 }
 
 #[tokio::test]
@@ -132,10 +176,17 @@ async fn logout_ends_sessions_only() {
     let third = third["token"].as_str().unwrap().to_owned();
 
     let pat = app.pat(cy.id, Scope::Write).await;
-    let (s, v) = app.call(Method::POST, "/v1/auth/logout", Some(&pat), None).await;
-    assert_eq!((s, v["error"].as_str()), (StatusCode::FORBIDDEN, Some("session_required")));
+    let (s, v) = app
+        .call(Method::POST, "/v1/auth/logout", Some(&pat), None)
+        .await;
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (StatusCode::FORBIDDEN, Some("session_required"))
+    );
 
-    let (s, v) = app.call(Method::POST, "/v1/auth/logout", Some(&cy.token), None).await;
+    let (s, v) = app
+        .call(Method::POST, "/v1/auth/logout", Some(&cy.token), None)
+        .await;
     assert_eq!(s, StatusCode::OK, "{v}");
     assert_eq!(v, json!({ "ok": true, "revoked": 1 }));
     let (s, _) = app.get("/v1/auth/me", &cy.token).await;
@@ -143,7 +194,9 @@ async fn logout_ends_sessions_only() {
     let (s, _) = app.get("/v1/auth/me", &second).await;
     assert_eq!(s, StatusCode::OK);
 
-    let (s, v) = app.post("/v1/auth/logout", Some(&second), json!({ "all": true })).await;
+    let (s, v) = app
+        .post("/v1/auth/logout", Some(&second), json!({ "all": true }))
+        .await;
     assert_eq!((s, v["revoked"].as_u64()), (StatusCode::OK, Some(2)));
     for t in [&second, &third] {
         assert_eq!(app.get("/v1/auth/me", t).await.0, StatusCode::UNAUTHORIZED);
@@ -161,44 +214,96 @@ async fn password_change() {
     let pat = app.pat(di.id, Scope::Write).await;
 
     let (s, v) = app
-        .post("/v1/auth/password", Some(&pat), json!({ "current": PASSWORD, "new": "another long password" }))
+        .post(
+            "/v1/auth/password",
+            Some(&pat),
+            json!({ "current": PASSWORD, "new": "another long password" }),
+        )
         .await;
-    assert_eq!((s, v["error"].as_str()), (StatusCode::FORBIDDEN, Some("session_required")));
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (StatusCode::FORBIDDEN, Some("session_required"))
+    );
     let (s, v) = app
-        .post("/v1/auth/password", Some(&di.token), json!({ "current": "not my password", "new": "another long password" }))
+        .post(
+            "/v1/auth/password",
+            Some(&di.token),
+            json!({ "current": "not my password", "new": "another long password" }),
+        )
         .await;
-    assert_eq!((s, v["error"].as_str()), (StatusCode::FORBIDDEN, Some("invalid_credentials")));
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (StatusCode::FORBIDDEN, Some("invalid_credentials"))
+    );
     for new in ["short", &"x".repeat(257)] {
         let (s, _) = app
-            .post("/v1/auth/password", Some(&di.token), json!({ "current": PASSWORD, "new": new }))
+            .post(
+                "/v1/auth/password",
+                Some(&di.token),
+                json!({ "current": PASSWORD, "new": new }),
+            )
             .await;
         assert_eq!(s, StatusCode::BAD_REQUEST);
     }
     let (s, v) = app
-        .post("/v1/auth/password", Some(&di.token), json!({ "current": PASSWORD, "new": "another long password" }))
+        .post(
+            "/v1/auth/password",
+            Some(&di.token),
+            json!({ "current": PASSWORD, "new": "another long password" }),
+        )
         .await;
     assert_eq!(s, StatusCode::OK, "{v}");
     assert_eq!(v, json!({ "ok": true, "revoked_sessions": 1 }));
-    assert_eq!(app.get("/v1/auth/me", &di.token).await.0, StatusCode::OK, "this session stays");
-    assert_eq!(app.get("/v1/auth/me", &other).await.0, StatusCode::UNAUTHORIZED);
-    assert_eq!(app.get("/v1/auth/me", &pat).await.0, StatusCode::OK, "tokens stay");
-    assert_eq!(app.login(&di.email, PASSWORD).await.0, StatusCode::UNAUTHORIZED);
-    assert_eq!(app.login(&di.email, "another long password").await.0, StatusCode::OK);
+    assert_eq!(
+        app.get("/v1/auth/me", &di.token).await.0,
+        StatusCode::OK,
+        "this session stays"
+    );
+    assert_eq!(
+        app.get("/v1/auth/me", &other).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        app.get("/v1/auth/me", &pat).await.0,
+        StatusCode::OK,
+        "tokens stay"
+    );
+    assert_eq!(
+        app.login(&di.email, PASSWORD).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        app.login(&di.email, "another long password").await.0,
+        StatusCode::OK
+    );
     // `old` is accepted as an alias of `current`.
     let (s, _) = app
-        .post("/v1/auth/password", Some(&di.token), json!({ "old": "another long password", "new": PASSWORD }))
+        .post(
+            "/v1/auth/password",
+            Some(&di.token),
+            json!({ "old": "another long password", "new": PASSWORD }),
+        )
         .await;
     assert_eq!(s, StatusCode::OK);
 
     // A password-less account (app / OIDC) with a session cannot set one itself.
-    let fed = app.federated_user(&unique_email("fed", "example.test")).await;
+    let fed = app
+        .federated_user(&unique_email("fed", "example.test"))
+        .await;
     let session = canvas_cloud_core::identity::create_session(app.db(), fed, None)
         .await
         .unwrap();
     let (s, v) = app
-        .post("/v1/auth/password", Some(&session), json!({ "current": "", "new": "another long password" }))
+        .post(
+            "/v1/auth/password",
+            Some(&session),
+            json!({ "current": "", "new": "another long password" }),
+        )
         .await;
-    assert_eq!((s, v["error"].as_str()), (StatusCode::FORBIDDEN, Some("password_not_set")));
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (StatusCode::FORBIDDEN, Some("password_not_set"))
+    );
 }
 
 #[tokio::test]
@@ -209,13 +314,24 @@ async fn linked_app_user_signs_in_after_an_admin_sets_a_password() {
     let (_, key) = app.app_for(id, "sub-linked").await;
     let hdr = [("x-canvas-user", "sub-linked")];
     let (s, canvas) = app
-        .call_with(Method::POST, "/v1/canvases", Some(&key), Some(json!({ "name": "Plans" })), &hdr)
+        .call_with(
+            Method::POST,
+            "/v1/canvases",
+            Some(&key),
+            Some(json!({ "name": "Plans" })),
+            &hdr,
+        )
         .await;
     assert_eq!(s, StatusCode::CREATED, "{canvas}");
-    assert_eq!(app.login(&email, PASSWORD).await.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        app.login(&email, PASSWORD).await.0,
+        StatusCode::UNAUTHORIZED
+    );
 
     // What `canvas-cloud admin users set-password` does.
-    let hash = canvas_cloud_core::identity::hash_password(PASSWORD.into()).await.unwrap();
+    let hash = canvas_cloud_core::identity::hash_password(PASSWORD.into())
+        .await
+        .unwrap();
     sqlx::query("UPDATE users SET password_hash = $2 WHERE id = $1")
         .bind(id)
         .bind(hash)
@@ -227,7 +343,10 @@ async fn linked_app_user_signs_in_after_an_admin_sets_a_password() {
     assert_eq!(v["user"]["id"], json!(id), "same users row");
     let (_, list) = app.get("/v1/canvases", v["token"].as_str().unwrap()).await;
     assert!(
-        list.as_array().unwrap().iter().any(|c| c["id"] == canvas["id"]),
+        list.as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["id"] == canvas["id"]),
         "{list}"
     );
 }
@@ -238,7 +357,11 @@ async fn personal_access_tokens() {
     let ed = app.user("ed").await;
 
     let (s, v) = app
-        .post("/v1/tokens", Some(&ed.token), json!({ "name": " CI bot ", "scope": "read", "expires_in_days": 30 }))
+        .post(
+            "/v1/tokens",
+            Some(&ed.token),
+            json!({ "name": " CI bot ", "scope": "read", "expires_in_days": 30 }),
+        )
         .await;
     assert_eq!(s, StatusCode::CREATED, "{v}");
     let read = v["token"].as_str().unwrap().to_owned();
@@ -255,7 +378,11 @@ async fn personal_access_tokens() {
     assert!((29..=30).contains(&days), "{days}");
     let read_id = v["id"].as_str().unwrap().to_owned();
     let (s, v) = app
-        .post("/v1/tokens", Some(&ed.token), json!({ "name": "agent", "scope": "write" }))
+        .post(
+            "/v1/tokens",
+            Some(&ed.token),
+            json!({ "name": "agent", "scope": "write" }),
+        )
         .await;
     assert_eq!(s, StatusCode::CREATED, "{v}");
     assert!(v["expires_at"].is_null());
@@ -265,7 +392,12 @@ async fn personal_access_tokens() {
     let (s, list) = app.get("/v1/tokens", &ed.token).await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(list["limit"], 50);
-    let names: Vec<&str> = list["tokens"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+    let names: Vec<&str> = list["tokens"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
     assert_eq!(names, ["agent", "CI bot"]);
     assert!(list["tokens"][0].get("token").is_none());
     let keys: Vec<&String> = list["tokens"][0].as_object().unwrap().keys().collect();
@@ -274,9 +406,16 @@ async fn personal_access_tokens() {
     // Scope enforced end to end: read tokens GET only, no rooms; write tokens do anything.
     let (s, _) = app.get("/v1/canvases", &read).await;
     assert_eq!(s, StatusCode::OK);
-    let (s, v) = app.post("/v1/canvases", Some(&read), json!({ "name": "no" })).await;
-    assert_eq!((s, v["error"].as_str()), (StatusCode::FORBIDDEN, Some("read_only_token")));
-    let (s, canvas) = app.post("/v1/canvases", Some(&write), json!({ "name": "yes" })).await;
+    let (s, v) = app
+        .post("/v1/canvases", Some(&read), json!({ "name": "no" }))
+        .await;
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (StatusCode::FORBIDDEN, Some("read_only_token"))
+    );
+    let (s, canvas) = app
+        .post("/v1/canvases", Some(&write), json!({ "name": "yes" }))
+        .await;
     assert_eq!(s, StatusCode::CREATED, "{canvas}");
     let id = canvas["id"].as_str().unwrap();
     let ws = |token: &str| {
@@ -297,12 +436,34 @@ async fn personal_access_tokens() {
     // Only a session manages tokens.
     for t in [&read, &write] {
         let (s, v) = app.get("/v1/tokens", t).await;
-        assert_eq!((s, v["error"].as_str()), (StatusCode::FORBIDDEN, Some("session_required")));
+        assert_eq!(
+            (s, v["error"].as_str()),
+            (StatusCode::FORBIDDEN, Some("session_required"))
+        );
     }
-    let (s, v) = app.post("/v1/tokens", Some(&write), json!({ "name": "x", "scope": "write" })).await;
-    assert_eq!((s, v["error"].as_str()), (StatusCode::FORBIDDEN, Some("session_required")));
-    let (s, v) = app.call(Method::DELETE, &format!("/v1/tokens/{read_id}"), Some(&write), None).await;
-    assert_eq!((s, v["error"].as_str()), (StatusCode::FORBIDDEN, Some("session_required")));
+    let (s, v) = app
+        .post(
+            "/v1/tokens",
+            Some(&write),
+            json!({ "name": "x", "scope": "write" }),
+        )
+        .await;
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (StatusCode::FORBIDDEN, Some("session_required"))
+    );
+    let (s, v) = app
+        .call(
+            Method::DELETE,
+            &format!("/v1/tokens/{read_id}"),
+            Some(&write),
+            None,
+        )
+        .await;
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (StatusCode::FORBIDDEN, Some("session_required"))
+    );
 
     // Validation.
     for bad in [
@@ -319,19 +480,50 @@ async fn personal_access_tokens() {
     }
 
     // Revoke: gone from the list and dead at once; unknown / someone else's → 404.
-    let (s, v) = app.call(Method::DELETE, &format!("/v1/tokens/{read_id}"), Some(&ed.token), None).await;
+    let (s, v) = app
+        .call(
+            Method::DELETE,
+            &format!("/v1/tokens/{read_id}"),
+            Some(&ed.token),
+            None,
+        )
+        .await;
     assert_eq!((s, v), (StatusCode::OK, json!({ "ok": true })));
-    assert_eq!(app.get("/v1/canvases", &read).await.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        app.get("/v1/canvases", &read).await.0,
+        StatusCode::UNAUTHORIZED
+    );
     let (_, v) = app.get("/v1/tokens", &ed.token).await;
     assert_eq!(v["tokens"].as_array().unwrap().len(), 1);
-    let (s, _) = app.call(Method::DELETE, &format!("/v1/tokens/{read_id}"), Some(&ed.token), None).await;
+    let (s, _) = app
+        .call(
+            Method::DELETE,
+            &format!("/v1/tokens/{read_id}"),
+            Some(&ed.token),
+            None,
+        )
+        .await;
     assert_eq!(s, StatusCode::NOT_FOUND);
-    let (s, _) = app.call(Method::DELETE, "/v1/tokens/not-a-uuid", Some(&ed.token), None).await;
+    let (s, _) = app
+        .call(
+            Method::DELETE,
+            "/v1/tokens/not-a-uuid",
+            Some(&ed.token),
+            None,
+        )
+        .await;
     assert_eq!(s, StatusCode::NOT_FOUND);
     let fay = app.user("fay").await;
     let (_, v) = app.get("/v1/tokens", &ed.token).await;
     let write_id = v["tokens"][0]["id"].as_str().unwrap().to_owned();
-    let (s, _) = app.call(Method::DELETE, &format!("/v1/tokens/{write_id}"), Some(&fay.token), None).await;
+    let (s, _) = app
+        .call(
+            Method::DELETE,
+            &format!("/v1/tokens/{write_id}"),
+            Some(&fay.token),
+            None,
+        )
+        .await;
     assert_eq!(s, StatusCode::NOT_FOUND);
     assert_eq!(app.get("/v1/canvases", &write).await.0, StatusCode::OK);
 
@@ -341,7 +533,10 @@ async fn personal_access_tokens() {
         .execute(app.db())
         .await
         .unwrap();
-    assert_eq!(app.get("/v1/canvases", &write).await.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        app.get("/v1/canvases", &write).await.0,
+        StatusCode::UNAUTHORIZED
+    );
     let (_, v) = app.get("/v1/tokens", &ed.token).await;
     assert_eq!(v["tokens"], json!([]));
 }
@@ -352,17 +547,43 @@ async fn token_limit() {
     let gus = app.user("gus").await;
     for i in 0..50 {
         let (s, v) = app
-            .post("/v1/tokens", Some(&gus.token), json!({ "name": format!("t{i}"), "scope": "read" }))
+            .post(
+                "/v1/tokens",
+                Some(&gus.token),
+                json!({ "name": format!("t{i}"), "scope": "read" }),
+            )
             .await;
         assert_eq!(s, StatusCode::CREATED, "{i}: {v}");
     }
-    let (s, v) = app.post("/v1/tokens", Some(&gus.token), json!({ "name": "one more", "scope": "read" })).await;
-    assert_eq!((s, v["error"].as_str()), (StatusCode::FORBIDDEN, Some("token_limit")));
+    let (s, v) = app
+        .post(
+            "/v1/tokens",
+            Some(&gus.token),
+            json!({ "name": "one more", "scope": "read" }),
+        )
+        .await;
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (StatusCode::FORBIDDEN, Some("token_limit"))
+    );
     let (_, list) = app.get("/v1/tokens", &gus.token).await;
     let id = list["tokens"][0]["id"].as_str().unwrap().to_owned();
-    let (s, _) = app.call(Method::DELETE, &format!("/v1/tokens/{id}"), Some(&gus.token), None).await;
+    let (s, _) = app
+        .call(
+            Method::DELETE,
+            &format!("/v1/tokens/{id}"),
+            Some(&gus.token),
+            None,
+        )
+        .await;
     assert_eq!(s, StatusCode::OK);
-    let (s, _) = app.post("/v1/tokens", Some(&gus.token), json!({ "name": "one more", "scope": "read" })).await;
+    let (s, _) = app
+        .post(
+            "/v1/tokens",
+            Some(&gus.token),
+            json!({ "name": "one more", "scope": "read" }),
+        )
+        .await;
     assert_eq!(s, StatusCode::CREATED);
 }
 
@@ -387,13 +608,19 @@ async fn events_stream_live_with_ids_and_only_the_callers() {
 
     let mut sse = app.events(&hal.token, &[]).await;
     assert_eq!(sse.status, StatusCode::OK);
-    assert!(sse.headers["content-type"].to_str().unwrap().starts_with("text/event-stream"));
+    assert!(sse.headers["content-type"]
+        .to_str()
+        .unwrap()
+        .starts_with("text/event-stream"));
     assert_eq!(sse.headers["cache-control"], "no-cache");
     let ready = sse.next(WAIT).await.expect("ready");
     assert_eq!(ready.event, "ready");
     let ready_id = ready.id.clone().unwrap();
     let start: u64 = ready_id.parse().unwrap();
-    assert!(start > 1_700_000_000_000_000 && start < 1 << 53, "microsecond base: {start}");
+    assert!(
+        start > 1_700_000_000_000_000 && start < 1 << 53,
+        "microsecond base: {start}"
+    );
     assert_eq!(ready.json()["last_event_id"], json!(start));
     let at = app.state.events.last_id();
     let wire = |n: u64| wire_from(&ready_id, at, n);
@@ -402,7 +629,9 @@ async fn events_stream_live_with_ids_and_only_the_callers() {
     // Ivy's events never reach Hal; Hal's REST actions do, with increasing ids and the
     // copper-cloud `canvas` frame JSON.
     app.state.events.publish(ivy.id, canvas_event("update"));
-    let (s, canvas) = app.post("/v1/canvases", Some(&hal.token), json!({ "name": "Board" })).await;
+    let (s, canvas) = app
+        .post("/v1/canvases", Some(&hal.token), json!({ "name": "Board" }))
+        .await;
     assert_eq!(s, StatusCode::CREATED);
     let f = sse.next(WAIT).await.expect("canvas event");
     assert_eq!(f.event, "canvas");
@@ -412,7 +641,11 @@ async fn events_stream_live_with_ids_and_only_the_callers() {
     );
     let id: u64 = f.id.as_deref().unwrap().parse().unwrap();
     assert!(id > start + 1, "ivy's event took an id");
-    assert!(!f.data.contains(' ') && !f.data.contains('\n'), "compact JSON: {}", f.data);
+    assert!(
+        !f.data.contains(' ') && !f.data.contains('\n'),
+        "compact JSON: {}",
+        f.data
+    );
 
     // A read-only PAT via ?token= (EventSource cannot set headers), and an app acting for Hal.
     let read = app.pat(hal.id, Scope::Read).await;
@@ -438,7 +671,9 @@ async fn events_stream_live_with_ids_and_only_the_callers() {
     // No credential, or ?token= without the event-stream Accept header → 401.
     let (s, _) = app.call(Method::GET, "/v1/events", None, None).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
-    let (s, _) = app.call(Method::GET, &format!("/v1/events?token={read}"), None, None).await;
+    let (s, _) = app
+        .call(Method::GET, &format!("/v1/events?token={read}"), None, None)
+        .await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
 }
 
@@ -461,11 +696,17 @@ async fn events_resume_from_last_event_id_or_resync() {
     let mut sse = app.events(&jo.token, &[("last-event-id", &wire(a))]).await;
     let f1 = sse.next(WAIT).await.unwrap();
     let f2 = sse.next(WAIT).await.unwrap();
-    assert_eq!((f1.event.as_str(), f1.id.clone()), ("canvas", Some(wire(b))));
+    assert_eq!(
+        (f1.event.as_str(), f1.id.clone()),
+        ("canvas", Some(wire(b)))
+    );
     assert_eq!(f1.json()["kind"], "b");
     assert_eq!(f2.id, Some(wire(c)));
     let ready = sse.next(WAIT).await.unwrap();
-    assert_eq!((ready.event.as_str(), ready.id.clone()), ("ready", Some(wire(c))));
+    assert_eq!(
+        (ready.event.as_str(), ready.id.clone()),
+        ("ready", Some(wire(c)))
+    );
     let d = ev.publish(jo.id, canvas_event("d"));
     assert_eq!(sse.next(WAIT).await.unwrap().id, Some(wire(d)));
     let d = wire(d);
@@ -485,7 +726,12 @@ async fn events_resume_from_last_event_id_or_resync() {
     // then ready.
     let base = r.parse::<u64>().unwrap() - at;
     let restarted = (base - 1).to_string();
-    for bad in [wire(999_999_999), restarted, a.to_string(), "nope".to_owned()] {
+    for bad in [
+        wire(999_999_999),
+        restarted,
+        a.to_string(),
+        "nope".to_owned(),
+    ] {
         let mut sse = app.events(&jo.token, &[("last-event-id", &bad)]).await;
         let f = sse.next(WAIT).await.unwrap();
         assert_eq!(f.event, "resync", "{bad}");
@@ -510,7 +756,9 @@ async fn events_end_when_the_credential_is_revoked() {
     let lu = app.user("lu").await;
     let mut sse = app.events(&lu.token, &[]).await;
     assert_eq!(sse.next(WAIT).await.unwrap().event, "ready");
-    let (s, _) = app.call(Method::POST, "/v1/auth/logout", Some(&lu.token), None).await;
+    let (s, _) = app
+        .call(Method::POST, "/v1/auth/logout", Some(&lu.token), None)
+        .await;
     assert_eq!(s, StatusCode::OK);
     let again = app.events(&lu.token, &[]).await;
     assert_eq!(again.status, StatusCode::UNAUTHORIZED);
@@ -550,8 +798,16 @@ async fn auth_routes_are_rate_limited_per_ip_and_per_email() {
             .await;
         statuses.push((s, v["error"].as_str().map(ToOwned::to_owned)));
     }
-    assert!(statuses[..3].iter().all(|(s, _)| *s == StatusCode::UNAUTHORIZED), "{statuses:?}");
-    assert_eq!(statuses[3], (StatusCode::TOO_MANY_REQUESTS, Some("rate_limited".into())));
+    assert!(
+        statuses[..3]
+            .iter()
+            .all(|(s, _)| *s == StatusCode::UNAUTHORIZED),
+        "{statuses:?}"
+    );
+    assert_eq!(
+        statuses[3],
+        (StatusCode::TOO_MANY_REQUESTS, Some("rate_limited".into()))
+    );
     let (s, _) = app
         .call_with(
             Method::POST,
@@ -583,7 +839,10 @@ async fn account_page_is_served_with_a_strict_csp() {
         assert_eq!(resp.status(), StatusCode::OK, "{path}");
         let h = resp.headers().clone();
         assert_eq!(h["content-type"], "text/html; charset=utf-8");
-        assert_eq!(h["content-security-policy"], canvas_cloud_accounts::CONTENT_SECURITY_POLICY);
+        assert_eq!(
+            h["content-security-policy"],
+            canvas_cloud_accounts::CONTENT_SECURITY_POLICY
+        );
         assert_eq!(h["x-content-type-options"], "nosniff");
         assert_eq!(h["x-frame-options"], "DENY");
         assert_eq!(h["cache-control"], "no-cache");
@@ -593,22 +852,54 @@ async fn account_page_is_served_with_a_strict_csp() {
         assert!(body.contains("href=\"/account/app.css\""));
         assert!(!body.contains("<script>"), "no inline script");
         assert!(!body.contains(" style="), "no inline style");
-        assert!(!body.contains("http://") && !body.contains("https://"), "no external requests");
+        assert!(
+            !body.contains("http://") && !body.contains("https://"),
+            "no external requests"
+        );
     }
     let csp = canvas_cloud_accounts::CONTENT_SECURITY_POLICY;
-    for want in ["default-src 'none'", "script-src 'self'", "style-src 'self'", "connect-src 'self'", "frame-ancestors 'none'"] {
+    for want in [
+        "default-src 'none'",
+        "script-src 'self'",
+        "style-src 'self'",
+        "connect-src 'self'",
+        "frame-ancestors 'none'",
+    ] {
         assert!(csp.contains(want), "{want}");
     }
     assert!(!csp.contains("unsafe-inline") && !csp.contains("unsafe-eval"));
-    let js = app.http.get(app.url("/account/app.js")).send().await.unwrap();
+    let js = app
+        .http
+        .get(app.url("/account/app.js"))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(js.status(), StatusCode::OK);
-    assert_eq!(js.headers()["content-type"], "text/javascript; charset=utf-8");
+    assert_eq!(
+        js.headers()["content-type"],
+        "text/javascript; charset=utf-8"
+    );
     let js = js.text().await.unwrap();
-    for api in ["/v1/auth/login", "/v1/auth/signup", "/v1/tokens", "/v1/canvases", "/v1/info", "sessionStorage"] {
+    for api in [
+        "/v1/auth/login",
+        "/v1/auth/signup",
+        "/v1/tokens",
+        "/v1/canvases",
+        "/v1/info",
+        "sessionStorage",
+    ] {
         assert!(js.contains(api), "{api}");
     }
-    assert!(!js.contains("http://") && !js.contains("https://"), "no external requests");
-    let css = app.http.get(app.url("/account/app.css")).send().await.unwrap();
+    assert!(
+        !js.contains("http://") && !js.contains("https://"),
+        "no external requests"
+    );
+    let css = app
+        .http
+        .get(app.url("/account/app.css"))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(css.headers()["content-type"], "text/css; charset=utf-8");
     assert!(css.text().await.unwrap().contains("prefers-color-scheme"));
     // Other methods are not served.
@@ -622,7 +913,10 @@ async fn info_lists_the_accounts_features() {
     let resp = app.http.get(app.url("/v1/info")).send().await.unwrap();
     let v: Value = resp.json().await.unwrap();
     for f in canvas_cloud_accounts::FEATURES {
-        assert!(v["features"].as_array().unwrap().contains(&json!(f)), "{f}: {v}");
+        assert!(
+            v["features"].as_array().unwrap().contains(&json!(f)),
+            "{f}: {v}"
+        );
     }
     assert_eq!(v["auth"]["password"], true);
 }

@@ -352,7 +352,9 @@ impl Sse {
                 }
             }
             let stream = self.stream.as_mut()?;
-            let chunk = tokio::time::timeout_at(deadline, stream.next()).await.ok()??;
+            let chunk = tokio::time::timeout_at(deadline, stream.next())
+                .await
+                .ok()??;
             self.buf
                 .push_str(&String::from_utf8_lossy(&chunk.ok()?).replace("\r\n", "\n"));
         }

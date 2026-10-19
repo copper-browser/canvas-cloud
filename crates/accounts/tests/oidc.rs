@@ -104,7 +104,11 @@ async fn callback(
     let fragment: HashMap<String, String> = location
         .as_ref()
         .and_then(|l| l.fragment())
-        .map(|f| url::form_urlencoded::parse(f.as_bytes()).into_owned().collect())
+        .map(|f| {
+            url::form_urlencoded::parse(f.as_bytes())
+                .into_owned()
+                .collect()
+        })
         .unwrap_or_default();
     (status, fragment, resp.text().await.unwrap(), location)
 }
@@ -136,9 +140,14 @@ async fn sign_in(
 #[tokio::test]
 async fn providers_are_listed() {
     let (app, _idp) = setup().await;
-    let (s, v) = app.call(reqwest::Method::GET, "/v1/auth/oidc", None, None).await;
+    let (s, v) = app
+        .call(reqwest::Method::GET, "/v1/auth/oidc", None, None)
+        .await;
     assert_eq!(s, StatusCode::OK);
-    assert_eq!(v["providers"][0], json!({ "id": "corp", "name": "Test corp", "start": "/v1/auth/oidc/corp/start" }));
+    assert_eq!(
+        v["providers"][0],
+        json!({ "id": "corp", "name": "Test corp", "start": "/v1/auth/oidc/corp/start" })
+    );
     assert_eq!(v["providers"].as_array().unwrap().len(), 3);
     let (_, info) = app.call(reqwest::Method::GET, "/v1/info", None, None).await;
     assert!(info["auth"]["oidc"].to_string().contains("corp"), "{info}");
@@ -147,8 +156,18 @@ async fn providers_are_listed() {
 #[tokio::test]
 async fn start_checks_the_request() {
     let (app, _idp) = setup().await;
-    let (s, v) = app.call(reqwest::Method::GET, "/v1/auth/oidc/nope/start?redirect_uri=x", None, None).await;
-    assert_eq!((s, v["error"].as_str()), (StatusCode::NOT_FOUND, Some("unknown_provider")));
+    let (s, v) = app
+        .call(
+            reqwest::Method::GET,
+            "/v1/auth/oidc/nope/start?redirect_uri=x",
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (StatusCode::NOT_FOUND, Some("unknown_provider"))
+    );
     for bad in [
         "",
         "https://evil.example/cb",
@@ -188,7 +207,12 @@ async fn start_checks_the_request() {
         .await
         .unwrap();
     let cookie = resp.headers()["set-cookie"].to_str().unwrap();
-    for attr in ["HttpOnly", "SameSite=Lax", "Path=/v1/auth/oidc/", "Max-Age=600"] {
+    for attr in [
+        "HttpOnly",
+        "SameSite=Lax",
+        "Path=/v1/auth/oidc/",
+        "Max-Age=600",
+    ] {
         assert!(cookie.contains(attr), "{cookie}");
     }
     assert!(!cookie.contains("Secure"), "http public_url");
@@ -202,11 +226,13 @@ async fn start_checks_the_request() {
     assert_eq!(q["nonce"].len(), 43);
     assert_ne!(q["nonce"], q["state"]);
     // Only a digest of the state is stored.
-    let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM oidc_states WHERE state_sha256 = sha256(convert_to($1, 'UTF8'))")
-        .bind(&s.state)
-        .fetch_one(app.db())
-        .await
-        .unwrap();
+    let stored: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM oidc_states WHERE state_sha256 = sha256(convert_to($1, 'UTF8'))",
+    )
+    .bind(&s.state)
+    .fetch_one(app.db())
+    .await
+    .unwrap();
     assert_eq!(stored, 1);
 }
 
@@ -257,7 +283,12 @@ async fn public_client_rs256_links_an_existing_password_account() {
         Signer::Rs256,
     )
     .await;
-    let (s, me) = app.get("/v1/auth/me", f.get("token").unwrap_or_else(|| panic!("{f:?}"))).await;
+    let (s, me) = app
+        .get(
+            "/v1/auth/me",
+            f.get("token").unwrap_or_else(|| panic!("{f:?}")),
+        )
+        .await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(me["user"]["id"], json!(pia.id), "same users row");
     assert_eq!(me["user"]["display_name"], "pia", "existing name kept");
@@ -272,27 +303,111 @@ async fn bad_identities_are_refused() {
     let email = unique_email("q", "corp.test");
     let now = time::OffsetDateTime::now_utc().unix_timestamp();
     let cases: Vec<(&str, Value, Signer, &str)> = vec![
-        ("nonce", json!({ "email": email, "nonce": "x".repeat(43) }), Signer::Es256, "nonce_mismatch"),
-        ("no nonce", json!({ "email": email, "nonce": null }), Signer::Es256, "nonce_mismatch"),
-        ("aud", json!({ "email": email, "aud": "someone-else" }), Signer::Es256, "invalid_id_token"),
-        ("azp", json!({ "email": email, "aud": [CLIENT_ID, "other"], "azp": "other" }), Signer::Es256, "invalid_id_token"),
-        ("multi-aud", json!({ "email": email, "aud": [CLIENT_ID, "other"] }), Signer::Es256, "invalid_id_token"),
-        ("iss", json!({ "email": email, "iss": "https://evil.example" }), Signer::Es256, "invalid_id_token"),
-        ("exp", json!({ "email": email, "exp": now - 600 }), Signer::Es256, "invalid_id_token"),
-        ("nbf", json!({ "email": email, "nbf": now + 600 }), Signer::Es256, "invalid_id_token"),
-        ("iat", json!({ "email": email, "iat": now + 3600 }), Signer::Es256, "invalid_id_token"),
-        ("rogue key", json!({ "email": email }), Signer::Rogue, "invalid_id_token"),
-        ("hs256", json!({ "email": email }), Signer::Hs256, "invalid_id_token"),
-        ("unverified", json!({ "email": email, "email_verified": false }), Signer::Es256, "email_not_verified"),
-        ("unverified str", json!({ "email": email, "email_verified": "false" }), Signer::Es256, "email_not_verified"),
-        ("no verified", json!({ "email": email, "email_verified": null }), Signer::Es256, "email_not_verified"),
+        (
+            "nonce",
+            json!({ "email": email, "nonce": "x".repeat(43) }),
+            Signer::Es256,
+            "nonce_mismatch",
+        ),
+        (
+            "no nonce",
+            json!({ "email": email, "nonce": null }),
+            Signer::Es256,
+            "nonce_mismatch",
+        ),
+        (
+            "aud",
+            json!({ "email": email, "aud": "someone-else" }),
+            Signer::Es256,
+            "invalid_id_token",
+        ),
+        (
+            "azp",
+            json!({ "email": email, "aud": [CLIENT_ID, "other"], "azp": "other" }),
+            Signer::Es256,
+            "invalid_id_token",
+        ),
+        (
+            "multi-aud",
+            json!({ "email": email, "aud": [CLIENT_ID, "other"] }),
+            Signer::Es256,
+            "invalid_id_token",
+        ),
+        (
+            "iss",
+            json!({ "email": email, "iss": "https://evil.example" }),
+            Signer::Es256,
+            "invalid_id_token",
+        ),
+        (
+            "exp",
+            json!({ "email": email, "exp": now - 600 }),
+            Signer::Es256,
+            "invalid_id_token",
+        ),
+        (
+            "nbf",
+            json!({ "email": email, "nbf": now + 600 }),
+            Signer::Es256,
+            "invalid_id_token",
+        ),
+        (
+            "iat",
+            json!({ "email": email, "iat": now + 3600 }),
+            Signer::Es256,
+            "invalid_id_token",
+        ),
+        (
+            "rogue key",
+            json!({ "email": email }),
+            Signer::Rogue,
+            "invalid_id_token",
+        ),
+        (
+            "hs256",
+            json!({ "email": email }),
+            Signer::Hs256,
+            "invalid_id_token",
+        ),
+        (
+            "unverified",
+            json!({ "email": email, "email_verified": false }),
+            Signer::Es256,
+            "email_not_verified",
+        ),
+        (
+            "unverified str",
+            json!({ "email": email, "email_verified": "false" }),
+            Signer::Es256,
+            "email_not_verified",
+        ),
+        (
+            "no verified",
+            json!({ "email": email, "email_verified": null }),
+            Signer::Es256,
+            "email_not_verified",
+        ),
         ("no email", json!({}), Signer::Es256, "email_missing"),
-        ("domain", json!({ "email": unique_email("q", "elsewhere.test") }), Signer::Es256, "domain_not_allowed"),
-        ("subdomain", json!({ "email": unique_email("q", "x.corp.test") }), Signer::Es256, "domain_not_allowed"),
+        (
+            "domain",
+            json!({ "email": unique_email("q", "elsewhere.test") }),
+            Signer::Es256,
+            "domain_not_allowed",
+        ),
+        (
+            "subdomain",
+            json!({ "email": unique_email("q", "x.corp.test") }),
+            Signer::Es256,
+            "domain_not_allowed",
+        ),
     ];
     for (what, claims, signer, want) in cases {
         let f = sign_in(&app, &idp, "corp", &claims, signer).await;
-        assert_eq!(f.get("error").map(String::as_str), Some(want), "{what}: {f:?}");
+        assert_eq!(
+            f.get("error").map(String::as_str),
+            Some(want),
+            "{what}: {f:?}"
+        );
         assert!(!f.contains_key("token"), "{what}");
         assert_ne!(f["error_description"], "");
     }
@@ -304,7 +419,14 @@ async fn bad_identities_are_refused() {
         .unwrap();
     assert_eq!(n, 0);
     // The azp check accepts a matching azp.
-    let f = sign_in(&app, &idp, "corp", &json!({ "email": email, "aud": [CLIENT_ID, "other"], "azp": CLIENT_ID }), Signer::Es256).await;
+    let f = sign_in(
+        &app,
+        &idp,
+        "corp",
+        &json!({ "email": email, "aud": [CLIENT_ID, "other"], "azp": CLIENT_ID }),
+        Signer::Es256,
+    )
+    .await;
     assert!(f.contains_key("token"), "{f:?}");
 }
 
@@ -312,7 +434,14 @@ async fn bad_identities_are_refused() {
 async fn account_rules() {
     let (app, idp) = setup().await;
     // Self-signup is off (the default) and `pub` names no domains → no new accounts.
-    let f = sign_in(&app, &idp, "pub", &json!({ "email": unique_email("r", "x.test") }), Signer::Es256).await;
+    let f = sign_in(
+        &app,
+        &idp,
+        "pub",
+        &json!({ "email": unique_email("r", "x.test") }),
+        Signer::Es256,
+    )
+    .await;
     assert_eq!(f["error"], "signup_closed");
     // Disabled accounts cannot sign in.
     let rex = app.user_in("rex", "corp.test").await;
@@ -321,12 +450,26 @@ async fn account_rules() {
         .execute(app.db())
         .await
         .unwrap();
-    let f = sign_in(&app, &idp, "corp", &json!({ "email": rex.email }), Signer::Es256).await;
+    let f = sign_in(
+        &app,
+        &idp,
+        "corp",
+        &json!({ "email": rex.email }),
+        Signer::Es256,
+    )
+    .await;
     assert_eq!(f["error"], "account_disabled");
     // An app-provisioned (password-less) user in an allowed domain signs in as themselves.
     let email = unique_email("sal", "corp.test");
     let sal = app.federated_user(&email).await;
-    let f = sign_in(&app, &idp, "corp", &json!({ "email": email, "name": "ignored" }), Signer::Es256).await;
+    let f = sign_in(
+        &app,
+        &idp,
+        "corp",
+        &json!({ "email": email, "name": "ignored" }),
+        Signer::Es256,
+    )
+    .await;
     let (_, me) = app.get("/v1/auth/me", &f["token"]).await;
     assert_eq!(me["user"]["id"], json!(sal));
 }
@@ -338,14 +481,26 @@ async fn callback_failures() {
 
     // The provider says no.
     let s = start(&app, "corp", &redirect).await;
-    let (st, f, _, _) = callback(&app, "corp", &[("error", "access_denied"), ("state", &s.state)], Some(&s.cookie)).await;
+    let (st, f, _, _) = callback(
+        &app,
+        "corp",
+        &[("error", "access_denied"), ("state", &s.state)],
+        Some(&s.cookie),
+    )
+    .await;
     assert_eq!(st, StatusCode::FOUND);
     assert_eq!(f["error"], "access_denied");
 
     // The token endpoint refuses the code.
     let s = start(&app, "corp", &redirect).await;
     let code = idp.issue_failing(&s.authorize);
-    let (_, f, _, _) = callback(&app, "corp", &[("code", &code), ("state", &s.state)], Some(&s.cookie)).await;
+    let (_, f, _, _) = callback(
+        &app,
+        "corp",
+        &[("code", &code), ("state", &s.state)],
+        Some(&s.cookie),
+    )
+    .await;
     assert_eq!(f["error"], "token_exchange_failed");
 
     // No code.
@@ -355,19 +510,45 @@ async fn callback_failures() {
 
     // Another browser (no / wrong cookie) — the state is burned either way.
     let s = start(&app, "corp", &redirect).await;
-    let code = idp.issue(&s.authorize, &json!({ "email": unique_email("t", "corp.test") }), Signer::Es256);
+    let code = idp.issue(
+        &s.authorize,
+        &json!({ "email": unique_email("t", "corp.test") }),
+        Signer::Es256,
+    );
     let (_, f, _, _) = callback(&app, "corp", &[("code", &code), ("state", &s.state)], None).await;
     assert_eq!(f["error"], "state_mismatch");
-    let (st, f, body, loc) = callback(&app, "corp", &[("code", &code), ("state", &s.state)], Some(&s.cookie)).await;
-    assert_eq!((st, f.len(), loc), (StatusCode::BAD_REQUEST, 0, None), "replayed state");
+    let (st, f, body, loc) = callback(
+        &app,
+        "corp",
+        &[("code", &code), ("state", &s.state)],
+        Some(&s.cookie),
+    )
+    .await;
+    assert_eq!(
+        (st, f.len(), loc),
+        (StatusCode::BAD_REQUEST, 0, None),
+        "replayed state"
+    );
     assert!(body.contains("Sign-in failed"));
     let s2 = start(&app, "corp", &redirect).await;
-    let (_, f, _, _) = callback(&app, "corp", &[("code", "c"), ("state", &s2.state)], Some(&s.cookie)).await;
+    let (_, f, _, _) = callback(
+        &app,
+        "corp",
+        &[("code", "c"), ("state", &s2.state)],
+        Some(&s.cookie),
+    )
+    .await;
     assert_eq!(f["error"], "state_mismatch");
 
     // The state belongs to another provider.
     let s = start(&app, "corp", &redirect).await;
-    let (st, _, _, _) = callback(&app, "pub", &[("code", "c"), ("state", &s.state)], Some(&s.cookie)).await;
+    let (st, _, _, _) = callback(
+        &app,
+        "pub",
+        &[("code", "c"), ("state", &s.state)],
+        Some(&s.cookie),
+    )
+    .await;
     assert_eq!(st, StatusCode::BAD_REQUEST);
 
     // Unknown / malformed state: an HTML page under a strict CSP (no redirect target known).
@@ -380,8 +561,14 @@ async fn callback_failures() {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{state}");
-        assert!(resp.headers()["content-type"].to_str().unwrap().starts_with("text/html"));
-        assert!(resp.headers()["content-security-policy"].to_str().unwrap().starts_with("default-src 'none'"));
+        assert!(resp.headers()["content-type"]
+            .to_str()
+            .unwrap()
+            .starts_with("text/html"));
+        assert!(resp.headers()["content-security-policy"]
+            .to_str()
+            .unwrap()
+            .starts_with("default-src 'none'"));
     }
 
     // Expired.
@@ -391,7 +578,13 @@ async fn callback_failures() {
         .execute(app.db())
         .await
         .unwrap();
-    let (_, f, _, _) = callback(&app, "corp", &[("code", "c"), ("state", &s.state)], Some(&s.cookie)).await;
+    let (_, f, _, _) = callback(
+        &app,
+        "corp",
+        &[("code", "c"), ("state", &s.state)],
+        Some(&s.cookie),
+    )
+    .await;
     assert_eq!(f["error"], "state_expired");
 
     // Unknown provider on the callback.
@@ -400,8 +593,18 @@ async fn callback_failures() {
 
     // Results go to a registered custom-scheme redirect as well.
     let s = start(&app, "corp", "cvcapp://signed-in").await;
-    let code = idp.issue(&s.authorize, &json!({ "email": unique_email("u", "corp.test") }), Signer::Es256);
-    let (_, f, _, loc) = callback(&app, "corp", &[("code", &code), ("state", &s.state)], Some(&s.cookie)).await;
+    let code = idp.issue(
+        &s.authorize,
+        &json!({ "email": unique_email("u", "corp.test") }),
+        Signer::Es256,
+    );
+    let (_, f, _, loc) = callback(
+        &app,
+        "corp",
+        &[("code", &code), ("state", &s.state)],
+        Some(&s.cookie),
+    )
+    .await;
     assert_eq!(loc.unwrap().scheme(), "cvcapp");
     assert!(f["token"].starts_with("cvs_"));
 }
