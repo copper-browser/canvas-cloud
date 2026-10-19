@@ -1,1 +1,212 @@
-<!doctype html><title>Account</title>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
+<title>Account · canvas-cloud</title>
+<link rel="stylesheet" href="/account/app.css">
+<script src="/account/app.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="bar">
+  <div class="bar-inner">
+    <span class="brand">
+      <svg class="mark" viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+        <rect x="1.5" y="1.5" width="17" height="17" rx="4" fill="none" stroke="currentColor" stroke-width="1.5"/>
+        <path d="M5.5 13.5 9 9.5l2.5 2.5 3-4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span>canvas-cloud</span>
+    </span>
+    <span class="host" id="host"></span>
+    <div class="who" id="who" hidden>
+      <span class="who-email" id="who-email"></span>
+      <button type="button" class="ghost" id="sign-out">Sign out</button>
+    </div>
+  </div>
+</header>
+
+<main id="main" tabindex="-1">
+  <p class="flash" id="flash" role="status" hidden></p>
+  <p class="loading" id="loading">Loading…</p>
+
+  <!-- Signed out -->
+  <section class="auth" id="auth" hidden aria-labelledby="auth-title">
+    <h1 id="auth-title">Sign in</h1>
+    <p class="lede" id="auth-lede">Manage your canvases, access tokens and connected agents on this server.</p>
+
+    <div class="providers" id="providers" hidden></div>
+    <p class="divider" id="divider" hidden><span>or with email</span></p>
+
+    <form id="login-form" novalidate>
+      <div class="field">
+        <label for="login-email">Email</label>
+        <input id="login-email" name="email" type="email" autocomplete="username" spellcheck="false" required>
+      </div>
+      <div class="field">
+        <label for="login-password">Password</label>
+        <div class="reveal">
+          <input id="login-password" name="password" type="password" autocomplete="current-password" required>
+          <button type="button" class="reveal-btn" data-reveal="login-password" aria-label="Show password" aria-pressed="false">Show</button>
+        </div>
+      </div>
+      <p class="error" id="login-error" role="alert" hidden></p>
+      <button type="submit" class="primary">Sign in</button>
+    </form>
+
+    <form id="signup-form" novalidate hidden>
+      <div class="field">
+        <label for="signup-email">Email</label>
+        <input id="signup-email" name="email" type="email" autocomplete="username" spellcheck="false" required>
+      </div>
+      <div class="field">
+        <label for="signup-name">Name <span class="optional">optional</span></label>
+        <input id="signup-name" name="display_name" type="text" autocomplete="name" maxlength="200">
+      </div>
+      <div class="field">
+        <label for="signup-password">Password</label>
+        <div class="reveal">
+          <input id="signup-password" name="password" type="password" autocomplete="new-password" minlength="10" maxlength="256" required aria-describedby="signup-password-hint">
+          <button type="button" class="reveal-btn" data-reveal="signup-password" aria-label="Show password" aria-pressed="false">Show</button>
+        </div>
+        <p class="hint" id="signup-password-hint">At least 10 characters.</p>
+      </div>
+      <p class="error" id="signup-error" role="alert" hidden></p>
+      <button type="submit" class="primary">Create account</button>
+    </form>
+
+    <p class="switch" id="to-signup-line" hidden>New here? <button type="button" class="link" id="to-signup">Create an account</button></p>
+    <p class="switch" id="to-login-line" hidden>Already have an account? <button type="button" class="link" id="to-login">Sign in</button></p>
+    <p class="note" id="signup-closed" hidden>Sign-up is closed on this server. Ask its administrator for an account.</p>
+  </section>
+
+  <!-- Signed in -->
+  <div class="account" id="account" hidden>
+    <div class="page-head">
+      <h1 id="greeting">Your account</h1>
+      <p class="lede" id="greeting-sub"></p>
+    </div>
+
+    <section aria-labelledby="canvases-title">
+      <div class="section-head">
+        <h2 id="canvases-title">Your canvases</h2>
+        <span class="count" id="canvas-count"></span>
+      </div>
+      <div class="table-wrap" id="canvases-wrap" hidden>
+        <table class="list" id="canvases">
+          <thead>
+            <tr><th scope="col">Name</th><th scope="col">Kind</th><th scope="col" class="num">Members</th><th scope="col">Updated</th><th scope="col"><span class="sr-only">Open</span></th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="empty" id="canvases-empty" hidden>
+        <svg viewBox="0 0 48 32" aria-hidden="true" focusable="false"><rect x="1" y="1" width="46" height="30" rx="5" fill="none" stroke="currentColor" stroke-dasharray="3 3"/><path d="M11 21l7-7 5 5 6-8 8 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <p>No canvases yet. Create one from a canvas app, or let a connected agent make one for you.</p>
+      </div>
+      <p class="hint" id="open-hint" hidden>No web app is set up to open canvases from here. Use a canvas by its id through the API (<code>GET /v1/canvases/{id}</code>) or an agent connected below.</p>
+    </section>
+
+    <section aria-labelledby="tokens-title">
+      <div class="section-head">
+        <h2 id="tokens-title">Access tokens</h2>
+        <span class="count" id="token-count"></span>
+      </div>
+      <p class="section-lede">Tokens let scripts and agents act as you. A read token can only look; a write token can also change and share your canvases.</p>
+      <form class="inline-form" id="token-form" novalidate>
+        <div class="field grow">
+          <label for="token-name">Name</label>
+          <input id="token-name" name="name" type="text" maxlength="200" placeholder="e.g. Laptop agent" required>
+        </div>
+        <div class="field">
+          <label for="token-scope">Access</label>
+          <select id="token-scope" name="scope">
+            <option value="read">Read only</option>
+            <option value="write">Read and write</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="token-expiry">Expires</label>
+          <select id="token-expiry" name="expires_in_days">
+            <option value="30">In 30 days</option>
+            <option value="90" selected>In 90 days</option>
+            <option value="365">In a year</option>
+            <option value="">Never</option>
+          </select>
+        </div>
+        <button type="submit" class="secondary">Create token</button>
+      </form>
+      <p class="error" id="token-error" role="alert" hidden></p>
+
+      <div class="secret" id="new-token" hidden>
+        <p class="secret-title" id="new-token-title">Copy this token now. It won’t be shown again.</p>
+        <div class="secret-row">
+          <code id="new-token-value" class="mono"></code>
+          <button type="button" class="ghost" data-copy="new-token-value">Copy</button>
+        </div>
+      </div>
+
+      <div class="table-wrap" id="tokens-wrap" hidden>
+        <table class="list" id="tokens">
+          <thead>
+            <tr><th scope="col">Name</th><th scope="col">Access</th><th scope="col">Last used</th><th scope="col">Expires</th><th scope="col"><span class="sr-only">Revoke</span></th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p class="muted" id="tokens-empty" hidden>No tokens yet.</p>
+    </section>
+
+    <section aria-labelledby="agent-title">
+      <div class="section-head"><h2 id="agent-title">Connect an agent</h2></div>
+      <p class="section-lede">Add this server to any MCP client. Agents then read and edit your canvases with the token’s access.</p>
+      <div class="snippet">
+        <div class="snippet-head">
+          <span class="snippet-label" id="snippet-label">MCP client config</span>
+          <button type="button" class="ghost" data-copy="mcp-snippet">Copy</button>
+        </div>
+        <pre><code id="mcp-snippet" class="mono"></code></pre>
+      </div>
+      <p class="hint" id="snippet-hint">Replace <code>&lt;token&gt;</code> with an access token from above.</p>
+      <p class="links"><a href="/llms.txt">llms.txt</a> describes this server for agents. <a href="/v1/openapi.json">OpenAPI</a> describes the REST API.</p>
+    </section>
+
+    <section aria-labelledby="profile-title">
+      <div class="section-head"><h2 id="profile-title">Profile</h2></div>
+      <div class="profile">
+        <form id="name-form" novalidate>
+          <div class="field">
+            <label for="profile-name">Display name</label>
+            <input id="profile-name" name="display_name" type="text" autocomplete="name" maxlength="200" required>
+          </div>
+          <p class="error" id="name-error" role="alert" hidden></p>
+          <button type="submit" class="secondary">Save name</button>
+        </form>
+        <form id="password-form" novalidate>
+          <input type="text" name="username" autocomplete="username" id="password-username" class="sr-only" tabindex="-1" aria-hidden="true">
+          <div class="field">
+            <label for="current-password">Current password</label>
+            <input id="current-password" name="current" type="password" autocomplete="current-password" required>
+          </div>
+          <div class="field">
+            <label for="new-password">New password</label>
+            <input id="new-password" name="new" type="password" autocomplete="new-password" minlength="10" maxlength="256" required aria-describedby="new-password-hint">
+            <p class="hint" id="new-password-hint">At least 10 characters. Your other sessions will be signed out; access tokens keep working.</p>
+          </div>
+          <p class="error" id="password-error" role="alert" hidden></p>
+          <button type="submit" class="secondary">Change password</button>
+        </form>
+      </div>
+    </section>
+  </div>
+</main>
+
+<footer class="foot">
+  <span id="version">canvas-cloud</span>
+  <a href="/llms.txt">llms.txt</a>
+  <a href="/v1/openapi.json">API</a>
+</footer>
+</body>
+</html>
