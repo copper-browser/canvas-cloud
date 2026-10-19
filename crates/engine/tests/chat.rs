@@ -9,8 +9,8 @@ mod common;
 use std::time::Duration;
 
 use axum::http::StatusCode;
+use canvas_cloud_engine::schema::{json_to_any, out_to_json};
 use common::{eventually, Peer, TestApp};
-use copper_cloud_canvas::schema::{json_to_any, out_to_json};
 use serde_json::{json, Value};
 use yrs::{Array as _, Doc, ReadTxn as _, Transact as _, TransactionMut, WriteTxn as _};
 
@@ -20,7 +20,7 @@ fn canvas_uuid(id: &str) -> uuid::Uuid {
     uuid::Uuid::parse_str(id).unwrap()
 }
 
-/// A message as the Copper page stores it (a plain object).
+/// A message as the canvas page stores it (a plain object).
 fn message(i: usize, author: &str, mentions: &[&str]) -> Value {
     json!({
         "id": format!("m{i}"),
@@ -101,17 +101,17 @@ async fn chat_persists_across_eviction_and_restart() {
     pa.close().await;
     pb.close().await;
     assert!(
-        eventually(T, || async { copper_cloud_canvas::evict_room_now(cid) }).await,
+        eventually(T, || async { canvas_cloud_engine::evict_room_now(cid) }).await,
         "room evicts once the peers are gone"
     );
-    assert!(!copper_cloud_canvas::room_in_memory(cid));
+    assert!(!canvas_cloud_engine::room_in_memory(cid));
     assert_eq!(chat_of(&app.state_doc(&ann, &id).await), live);
-    assert!(eventually(T, || async { copper_cloud_canvas::evict_room_now(cid) }).await);
+    assert!(eventually(T, || async { canvas_cloud_engine::evict_room_now(cid) }).await);
 
     // A restarted server (same database and master key; fresh pool, state, router and
     // listener; nothing in memory) serves the same chat over REST and over the socket.
     let app2 = app.restart().await;
-    assert!(!copper_cloud_canvas::room_in_memory(cid));
+    assert!(!canvas_cloud_engine::room_in_memory(cid));
     assert_eq!(chat_of(&app2.state_doc(&ben, &id).await), live);
     let mut pc = app2.peer(&ben, &id).await;
     assert_eq!(chat_of(&pc.doc), live, "reconnecting peer syncs the chat");
@@ -150,7 +150,7 @@ async fn chat_persists_across_eviction_and_restart() {
         "server applied the cap and the edit"
     );
     pc.close().await;
-    assert!(eventually(T, || async { copper_cloud_canvas::evict_room_now(cid) }).await);
+    assert!(eventually(T, || async { canvas_cloud_engine::evict_room_now(cid) }).await);
     assert_eq!(chat_of(&app2.state_doc(&ann, &id).await), after);
     let (_, read) = app2.get(&ann, &format!("/canvases/{id}/read")).await;
     assert_eq!(read["chat"][0]["text"], "message 2, edited");
@@ -214,7 +214,7 @@ async fn chat_survives_compaction_and_read_shows_the_last_50() {
             .unwrap();
     assert!(snapshot.is_some(), "a snapshot exists after > 200 updates");
 
-    assert!(eventually(T, || async { copper_cloud_canvas::evict_room_now(cid) }).await);
+    assert!(eventually(T, || async { canvas_cloud_engine::evict_room_now(cid) }).await);
     let reloaded = chat_of(&app.state_doc(&ann, &id).await);
     assert_eq!(reloaded.len(), n + 2);
     assert_eq!(reloaded[0], message(0, "ann", &[]));

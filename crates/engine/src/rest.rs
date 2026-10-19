@@ -1,24 +1,18 @@
-//! Canvases REST API (mounted under `/v1` by the binary).
+//! The canvas service: every canvas operation as a plain async function over
+//! [`SharedState`] + [`AuthUser`] (re-exported as [`crate::api`]). The REST handlers in
+//! `http.rs` are thin wrappers over these, and other crates (MCP, app admin, import) call
+//! them directly.
 //!
 //! Access control: every canvas lookup joins `canvas_members` on the caller, so a canvas the
-//! caller is not a member of is indistinguishable from one that does not exist (404).
+//! caller is not a member of is indistinguishable from one that does not exist (404). A
+//! `canvas` argument is a canvas UUID or [`PERSONAL`].
 
-use axum::body::Bytes;
-use axum::extract::ws::rejection::WebSocketUpgradeRejection;
-use axum::extract::{FromRequest, Path, Query, Request, State, WebSocketUpgrade};
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode, Uri};
-use axum::response::{Html, IntoResponse, Response};
-use axum::Json;
-use base64::engine::general_purpose::STANDARD;
-use base64::Engine as _;
-use copper_cloud_core::auth::{user_id_by_email, AuthUser};
-use copper_cloud_core::crypto::Crypto;
-use copper_cloud_core::error::ApiError;
-use copper_cloud_core::events::Event;
-use copper_cloud_core::extract::{OptionalJsonBody, QueryParams};
-use copper_cloud_core::ids;
-use copper_cloud_core::state::{AppState, SharedState};
-use serde::de::DeserializeOwned;
+use canvas_cloud_core::crypto::Crypto;
+use canvas_cloud_core::error::ApiError;
+use canvas_cloud_core::events::Event;
+use canvas_cloud_core::identity::{user_id_by_email, AuthUser};
+use canvas_cloud_core::ids;
+use canvas_cloud_core::state::{AppState, SharedState};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -37,40 +31,11 @@ use crate::read::{read_canvas_txn, CanvasRef, ReadOpts};
 use crate::room::{rooms, SERVER_ORIGIN};
 use crate::schema::{out_to_json, AGENTS, META, SHAPES};
 use crate::store;
-use crate::ws::{serve_peer, MAX_MESSAGE_BYTES};
 
 /// Path segment that resolves to the caller's Personal canvas.
 pub const PERSONAL: &str = "personal";
 /// Longest canvas name (characters).
 pub const MAX_NAME_CHARS: usize = 200;
-
-// ---------------------------------------------------------------------------------------------
-// Extractors
-
-/// JSON body (any or no `Content-Type`, like core's extractor) whose rejections are reported
-/// as [`ApiError`]: `413` over the router's body limit, `400` on malformed JSON.
-pub(crate) struct Body<T>(pub T);
-
-impl<T, S> FromRequest<S> for Body<T>
-where
-    T: DeserializeOwned,
-    S: Send + Sync,
-{
-    type Rejection = ApiError;
-
-    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
-        let bytes = Bytes::from_request(req, state).await.map_err(|e| {
-            if e.status() == StatusCode::PAYLOAD_TOO_LARGE {
-                ApiError::PayloadTooLarge
-            } else {
-                ApiError::bad_request("failed to read request body")
-            }
-        })?;
-        serde_json::from_slice(&bytes)
-            .map(Self)
-            .map_err(|e| ApiError::bad_request(format!("invalid JSON body: {e}")))
-    }
-}
 
 // ---------------------------------------------------------------------------------------------
 // Views
@@ -177,12 +142,15 @@ pub struct InviteView {
 /// `POST /canvases/:id/invites` response: the invite plus whether this call reminded the
 /// invitee of an invite that was already pending.
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct InviteSent {
+pub struct InviteSent {
     #[serde(flatten)]
-    invite: InviteView,
+    pub invite: InviteView,
     /// `true` only on a `200` re-send that notified the invitee; `false` on a new invite
     /// (`201`, which notifies on its own), when throttled, or when the email has no account yet.
-    nudged: bool,
+    pub nudged: bool,
+    /// A new invite was created (`201`); `false` when one was already pending (`200`).
+    #[serde(skip)]
+    pub created: bool,
 }
 
 /// A share link as returned by the owner's link list.
@@ -196,14 +164,33 @@ pub struct ShareLinkView {
     pub uses: i64,
 }
 
+/// `POST /canvases/:id/links` response — the only time the token is shown.
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct CreatedShareLink {
-    id: Uuid,
-    token: String,
-    canvas_id: Uuid,
-    role: String,
+pub struct CreatedShareLink {
+    pub id: Uuid,
+    pub token: String,
+    pub canvas_id: Uuid,
+    pub role: String,
     #[serde(with = "time::serde::rfc3339")]
-    created_at: OffsetDateTime,
+    pub created_at: OffsetDateTime,
+}
+
+/// `GET /canvas-links/:token` response.
+#[derive(Debug, Clone, Serialize)]
+pub struct ShareLinkPreview {
+    pub canvas_id: Uuid,
+    pub name: String,
+    pub owner: ShareLinkOwner,
+    pub role: String,
+    /// The caller is already a member.
+    pub member: bool,
+}
+
+/// The canvas owner in a [`ShareLinkPreview`].
+#[derive(Debug, Clone, Serialize)]
+pub struct ShareLinkOwner {
+    pub id: Uuid,
+    pub display_name: String,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -502,10 +489,6 @@ async fn display_name(state: &AppState, user: &AuthUser) -> Result<String, ApiEr
         .unwrap_or_else(|| user.email.clone()))
 }
 
-fn ok() -> Json<Value> {
-    Json(json!({ "ok": true }))
-}
-
 fn link_not_found() -> ApiError {
     ApiError::NotFoundCode {
         code: SHARE_LINK_NOT_FOUND,
@@ -513,66 +496,62 @@ fn link_not_found() -> ApiError {
     }
 }
 
-fn token_digest(token: &str) -> Option<[u8; 32]> {
+pub(crate) fn token_digest(token: &str) -> Option<[u8; 32]> {
     ids::is_token_shape(token).then(|| ids::sha256(token.as_bytes()))
 }
 
 // ---------------------------------------------------------------------------------------------
 // Canvases
 
-pub(crate) async fn list_canvases(
-    State(state): State<SharedState>,
-    user: AuthUser,
-) -> Result<Json<Vec<CanvasView>>, ApiError> {
-    ensure_personal_canvas(&state, user.user_id).await?;
+/// The caller's canvases (Personal first, created on first use), most recently updated first.
+pub async fn list_canvases(
+    state: &SharedState,
+    user: &AuthUser,
+) -> Result<Vec<CanvasView>, ApiError> {
+    ensure_personal_canvas(state, user.user_id).await?;
     let rows = sqlx::query_as::<_, CanvasRow>(CANVAS_VIEW_SQL)
         .bind(user.user_id)
         .bind(None::<Uuid>)
         .fetch_all(&state.db)
         .await?;
-    Ok(Json(rows.into_iter().map(CanvasView::from).collect()))
+    Ok(rows.into_iter().map(CanvasView::from).collect())
 }
 
-#[derive(Deserialize)]
-pub(crate) struct NameBody {
-    name: String,
-}
-
-pub(crate) async fn create_canvas(
-    State(state): State<SharedState>,
-    user: AuthUser,
-    Body(body): Body<NameBody>,
-) -> Result<(StatusCode, Json<CanvasView>), ApiError> {
-    let name = canvas_name(&body.name)?;
+/// Create a shared canvas owned by the caller (`201` over REST).
+pub async fn create_canvas(
+    state: &SharedState,
+    user: &AuthUser,
+    name: &str,
+) -> Result<CanvasView, ApiError> {
+    let name = canvas_name(name)?;
     let mut tx = state.db.begin().await?;
-    let id = insert_canvas(&mut tx, &state, user.user_id, &name, "shared")
+    let id = insert_canvas(&mut tx, state, user.user_id, &name, "shared")
         .await?
         .ok_or_else(|| ApiError::internal("canvas insert returned nothing"))?;
     tx.commit().await?;
     tracing::info!(user_id = %user.user_id, canvas_id = %id, "canvas created");
-    publish(&state, &[user.user_id], id, "created");
-    Ok((
-        StatusCode::CREATED,
-        Json(canvas_view(&state, user.user_id, id).await?),
-    ))
+    publish(state, &[user.user_id], id, "created");
+    canvas_view(state, user.user_id, id).await
 }
 
-pub(crate) async fn get_canvas(
-    State(state): State<SharedState>,
-    user: AuthUser,
-    Path(raw): Path<String>,
-) -> Result<Json<CanvasView>, ApiError> {
-    let a = access(&state, user.user_id, &raw).await?;
-    Ok(Json(canvas_view(&state, user.user_id, a.canvas_id).await?))
+/// One canvas the caller is a member of.
+pub async fn get_canvas(
+    state: &SharedState,
+    user: &AuthUser,
+    canvas: &str,
+) -> Result<CanvasView, ApiError> {
+    let a = access(state, user.user_id, canvas).await?;
+    canvas_view(state, user.user_id, a.canvas_id).await
 }
 
-pub(crate) async fn rename_canvas(
-    State(state): State<SharedState>,
-    user: AuthUser,
-    Path(raw): Path<String>,
-    Body(body): Body<NameBody>,
-) -> Result<Json<CanvasView>, ApiError> {
-    let a = access(&state, user.user_id, &raw).await?;
+/// Rename a shared canvas (owner only); also updates the document's `meta.name`.
+pub async fn rename_canvas(
+    state: &SharedState,
+    user: &AuthUser,
+    canvas: &str,
+    name: &str,
+) -> Result<CanvasView, ApiError> {
+    let a = access(state, user.user_id, canvas).await?;
     if a.is_personal() {
         return Err(ApiError::bad_request(
             "the Personal canvas cannot be renamed",
@@ -581,7 +560,7 @@ pub(crate) async fn rename_canvas(
     if !a.is_owner() {
         return Err(ApiError::Forbidden);
     }
-    let name = canvas_name(&body.name)?;
+    let name = canvas_name(name)?;
     sqlx::query("UPDATE canvases SET name = $2, updated_at = now() WHERE id = $1")
         .bind(a.canvas_id)
         .bind(&name)
@@ -589,21 +568,23 @@ pub(crate) async fn rename_canvas(
         .await?;
     // Keep the document's `meta.name` in step (persisted + broadcast like any update).
     let room = rooms().get(a.canvas_id);
-    room.transact(&state, SERVER_ORIGIN, |txn| {
+    room.transact(state, SERVER_ORIGIN, |txn| {
         let meta = txn.get_or_insert_map(META);
         meta.try_update(txn, "name", name.as_str());
     })
     .await?;
-    publish_members(&state, a.canvas_id, "renamed").await;
-    Ok(Json(canvas_view(&state, user.user_id, a.canvas_id).await?))
+    publish_members(state, a.canvas_id, "renamed").await;
+    canvas_view(state, user.user_id, a.canvas_id).await
 }
 
-pub(crate) async fn delete_canvas(
-    State(state): State<SharedState>,
-    user: AuthUser,
-    Path(raw): Path<String>,
-) -> Result<Json<Value>, ApiError> {
-    let a = access(&state, user.user_id, &raw).await?;
+/// Delete a shared canvas (owner only): closes its room (4404) and tells every member
+/// (`deleted`). REST answers `{"ok":true}`.
+pub async fn delete_canvas(
+    state: &SharedState,
+    user: &AuthUser,
+    canvas: &str,
+) -> Result<(), ApiError> {
+    let a = access(state, user.user_id, canvas).await?;
     if a.is_personal() {
         return Err(ApiError::bad_request(
             "the Personal canvas cannot be deleted",
@@ -612,7 +593,7 @@ pub(crate) async fn delete_canvas(
     if !a.is_owner() {
         return Err(ApiError::Forbidden);
     }
-    let members = member_ids(&state, a.canvas_id).await?;
+    let members = member_ids(state, a.canvas_id).await?;
     let deleted = sqlx::query("DELETE FROM canvases WHERE id = $1 AND owner_id = $2")
         .bind(a.canvas_id)
         .bind(user.user_id)
@@ -624,19 +605,20 @@ pub(crate) async fn delete_canvas(
     }
     rooms().close(a.canvas_id);
     tracing::info!(user_id = %user.user_id, canvas_id = %a.canvas_id, "canvas deleted");
-    publish(&state, &members, a.canvas_id, "deleted");
-    Ok(ok())
+    publish(state, &members, a.canvas_id, "deleted");
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------------------------
 // Members
 
-pub(crate) async fn list_members(
-    State(state): State<SharedState>,
-    user: AuthUser,
-    Path(raw): Path<String>,
-) -> Result<Json<Vec<MemberView>>, ApiError> {
-    let a = access(&state, user.user_id, &raw).await?;
+/// The canvas's members, owner first.
+pub async fn list_members(
+    state: &SharedState,
+    user: &AuthUser,
+    canvas: &str,
+) -> Result<Vec<MemberView>, ApiError> {
+    let a = access(state, user.user_id, canvas).await?;
     let rows = sqlx::query_as::<_, MemberView>(
         "SELECT m.user_id, u.email, u.display_name, m.role, m.added_at
          FROM canvas_members m JOIN users u ON u.id = m.user_id
@@ -646,16 +628,19 @@ pub(crate) async fn list_members(
     .bind(a.canvas_id)
     .fetch_all(&state.db)
     .await?;
-    Ok(Json(rows))
+    Ok(rows)
 }
 
-pub(crate) async fn remove_member(
-    State(state): State<SharedState>,
-    user: AuthUser,
-    Path((raw, target)): Path<(String, String)>,
-) -> Result<Json<Value>, ApiError> {
-    let a = access(&state, user.user_id, &raw).await?;
-    let target = Uuid::parse_str(&target).map_err(|_| ApiError::NotFound)?;
+/// Remove a member (owner), or leave (an editor removing themselves). `target` is the
+/// member's user id; a malformed one is a 404. REST answers `{"ok":true}`.
+pub async fn remove_member(
+    state: &SharedState,
+    user: &AuthUser,
+    canvas: &str,
+    target: &str,
+) -> Result<(), ApiError> {
+    let a = access(state, user.user_id, canvas).await?;
+    let target = Uuid::parse_str(target).map_err(|_| ApiError::NotFound)?;
     if a.is_personal() {
         return Err(ApiError::bad_request("the Personal canvas has no members"));
     }
@@ -680,18 +665,13 @@ pub(crate) async fn remove_member(
         return Err(ApiError::NotFound);
     }
     rooms().kick_user(a.canvas_id, target);
-    publish(&state, &[target], a.canvas_id, "member_removed");
-    publish_members(&state, a.canvas_id, "member_removed").await;
-    Ok(ok())
+    publish(state, &[target], a.canvas_id, "member_removed");
+    publish_members(state, a.canvas_id, "member_removed").await;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------------------------
 // Invites
-
-#[derive(Deserialize)]
-pub(crate) struct InviteBody {
-    email: String,
-}
 
 async fn invite_view(state: &AppState, id: Uuid) -> Result<InviteView, ApiError> {
     sqlx::query_as::<_, InviteRow>(&format!("{INVITE_VIEW_SQL} WHERE i.id = $1"))
@@ -702,19 +682,22 @@ async fn invite_view(state: &AppState, id: Uuid) -> Result<InviteView, ApiError>
         .ok_or(ApiError::NotFound)
 }
 
-pub(crate) async fn create_invite(
-    State(state): State<SharedState>,
-    user: AuthUser,
-    Path(raw): Path<String>,
-    Body(body): Body<InviteBody>,
-) -> Result<(StatusCode, Json<InviteSent>), ApiError> {
-    let a = access(&state, user.user_id, &raw).await?;
+/// Invite `email` to a shared canvas (any member may invite). A second invite of a pending
+/// email re-sends it (throttled to one reminder per [`INVITE_NUDGE_INTERVAL_SECS`]):
+/// [`InviteSent::created`] says which (`201` vs `200` over REST).
+pub async fn create_invite(
+    state: &SharedState,
+    user: &AuthUser,
+    canvas: &str,
+    email: &str,
+) -> Result<InviteSent, ApiError> {
+    let a = access(state, user.user_id, canvas).await?;
     if a.is_personal() {
         return Err(ApiError::bad_request(
             "the Personal canvas cannot be shared",
         ));
     }
-    let email = invite_email(&body.email)?;
+    let email = invite_email(email)?;
     if email == user.email.trim().to_lowercase() {
         return Err(ApiError::bad_request(
             "you are already a member of this canvas",
@@ -748,24 +731,28 @@ pub(crate) async fn create_invite(
     .fetch_optional(&state.db)
     .await?;
     let invitee = user_id_by_email(&state.db, &email).await?;
-    let (status, id, nudged) = if let Some(id) = created {
+    let (created, id, nudged) = if let Some(id) = created {
         tracing::info!(user_id = %user.user_id, canvas_id = %a.canvas_id, invite_id = %id, "canvas invite created");
         if let Some(invitee) = invitee {
-            publish(&state, &[invitee], a.canvas_id, "invited");
+            publish(state, &[invitee], a.canvas_id, "invited");
         }
-        (StatusCode::CREATED, id, false)
+        (true, id, false)
     } else {
-        let (id, nudged) = nudge_invite(&state, a.canvas_id, &email, invitee.is_some()).await?;
+        let (id, nudged) = nudge_invite(state, a.canvas_id, &email, invitee.is_some()).await?;
         if nudged {
             tracing::info!(user_id = %user.user_id, canvas_id = %a.canvas_id, invite_id = %id, "canvas invite re-sent");
             if let Some(invitee) = invitee {
-                publish(&state, &[invitee], a.canvas_id, "invited");
+                publish(state, &[invitee], a.canvas_id, "invited");
             }
         }
-        (StatusCode::OK, id, nudged)
+        (false, id, nudged)
     };
-    let invite = invite_view(&state, id).await?;
-    Ok((status, Json(InviteSent { invite, nudged })))
+    let invite = invite_view(state, id).await?;
+    Ok(InviteSent {
+        invite,
+        nudged,
+        created,
+    })
 }
 
 /// The pending invite of `email` to `canvas_id`, re-sent: when the invitee has an account and
@@ -810,13 +797,14 @@ async fn nudge_invite(
 /// `DELETE /canvases/:id/invites/:invite_id` — the canvas owner or the original inviter
 /// withdraws a pending invite (`204`). Other members get `403`; an unknown invite, one of
 /// another canvas, or one that is no longer pending is `404`.
-pub(crate) async fn revoke_invite(
-    State(state): State<SharedState>,
-    user: AuthUser,
-    Path((raw, invite)): Path<(String, String)>,
-) -> Result<StatusCode, ApiError> {
-    let a = access(&state, user.user_id, &raw).await?;
-    let invite_id = Uuid::parse_str(&invite).map_err(|_| ApiError::NotFound)?;
+pub async fn revoke_invite(
+    state: &SharedState,
+    user: &AuthUser,
+    canvas: &str,
+    invite: &str,
+) -> Result<(), ApiError> {
+    let a = access(state, user.user_id, canvas).await?;
+    let invite_id = Uuid::parse_str(invite).map_err(|_| ApiError::NotFound)?;
     let row: Option<(Option<Uuid>, String)> = sqlx::query_as(
         "SELECT invited_by, email FROM canvas_invites
          WHERE id = $1 AND canvas_id = $2 AND status = 'pending'",
@@ -844,30 +832,29 @@ pub(crate) async fn revoke_invite(
     }
     tracing::info!(user_id = %user.user_id, canvas_id = %a.canvas_id, %invite_id, "canvas invite revoked");
     if let Some(invitee) = user_id_by_email(&state.db, &email).await? {
-        publish(&state, &[invitee], a.canvas_id, "invite_revoked");
+        publish(state, &[invitee], a.canvas_id, "invite_revoked");
     }
-    Ok(StatusCode::NO_CONTENT)
+    Ok(())
 }
 
-pub(crate) async fn list_canvas_invites(
-    State(state): State<SharedState>,
-    user: AuthUser,
-    Path(raw): Path<String>,
-) -> Result<Json<Vec<InviteView>>, ApiError> {
-    let a = access(&state, user.user_id, &raw).await?;
+/// The canvas's pending invites, newest first.
+pub async fn list_canvas_invites(
+    state: &SharedState,
+    user: &AuthUser,
+    canvas: &str,
+) -> Result<Vec<InviteView>, ApiError> {
+    let a = access(state, user.user_id, canvas).await?;
     let rows = sqlx::query_as::<_, InviteRow>(&format!(
         "{INVITE_VIEW_SQL} WHERE i.canvas_id = $1 AND i.status = 'pending' ORDER BY i.created_at DESC"
     ))
     .bind(a.canvas_id)
     .fetch_all(&state.db)
     .await?;
-    Ok(Json(rows.into_iter().map(InviteView::from).collect()))
+    Ok(rows.into_iter().map(InviteView::from).collect())
 }
 
-pub(crate) async fn my_invites(
-    State(state): State<SharedState>,
-    user: AuthUser,
-) -> Result<Json<Vec<InviteView>>, ApiError> {
+/// The caller's pending invites (by their email), newest first.
+pub async fn my_invites(state: &SharedState, user: &AuthUser) -> Result<Vec<InviteView>, ApiError> {
     let rows = sqlx::query_as::<_, InviteRow>(&format!(
         "{INVITE_VIEW_SQL} WHERE i.email = lower($1) AND i.status = 'pending'
          ORDER BY i.created_at DESC"
@@ -875,15 +862,16 @@ pub(crate) async fn my_invites(
     .bind(user.email.trim())
     .fetch_all(&state.db)
     .await?;
-    Ok(Json(rows.into_iter().map(InviteView::from).collect()))
+    Ok(rows.into_iter().map(InviteView::from).collect())
 }
 
-pub(crate) async fn accept_invite(
-    State(state): State<SharedState>,
-    user: AuthUser,
-    Path(raw): Path<String>,
-) -> Result<Json<CanvasView>, ApiError> {
-    let id = Uuid::parse_str(&raw).map_err(|_| ApiError::NotFound)?;
+/// Accept one of the caller's pending invites (`invite` = its id); returns the canvas.
+pub async fn accept_invite(
+    state: &SharedState,
+    user: &AuthUser,
+    invite: &str,
+) -> Result<CanvasView, ApiError> {
+    let id = Uuid::parse_str(invite).map_err(|_| ApiError::NotFound)?;
     let mut tx = state.db.begin().await?;
     let canvas_id: Uuid = sqlx::query_scalar(
         "SELECT canvas_id FROM canvas_invites
@@ -909,16 +897,17 @@ pub(crate) async fn accept_invite(
         .await?;
     tx.commit().await?;
     tracing::info!(user_id = %user.user_id, %canvas_id, invite_id = %id, "canvas invite accepted");
-    publish_members(&state, canvas_id, "member_added").await;
-    Ok(Json(canvas_view(&state, user.user_id, canvas_id).await?))
+    publish_members(state, canvas_id, "member_added").await;
+    canvas_view(state, user.user_id, canvas_id).await
 }
 
-pub(crate) async fn decline_invite(
-    State(state): State<SharedState>,
-    user: AuthUser,
-    Path(raw): Path<String>,
-) -> Result<Json<Value>, ApiError> {
-    let id = Uuid::parse_str(&raw).map_err(|_| ApiError::NotFound)?;
+/// Decline one of the caller's pending invites. REST answers `{"ok":true}`.
+pub async fn decline_invite(
+    state: &SharedState,
+    user: &AuthUser,
+    invite: &str,
+) -> Result<(), ApiError> {
+    let id = Uuid::parse_str(invite).map_err(|_| ApiError::NotFound)?;
     let row: Option<(Uuid, Option<Uuid>)> = sqlx::query_as(
         "UPDATE canvas_invites SET status = 'declined'
          WHERE id = $1 AND email = lower($2) AND status = 'pending'
@@ -930,32 +919,29 @@ pub(crate) async fn decline_invite(
     .await?;
     let (canvas_id, inviter) = row.ok_or(ApiError::NotFound)?;
     if let Some(inviter) = inviter {
-        publish(&state, &[inviter], canvas_id, "invite_declined");
+        publish(state, &[inviter], canvas_id, "invite_declined");
     }
-    Ok(ok())
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------------------------
 // Share links
 
-#[derive(Debug, Default, Deserialize)]
-pub(crate) struct ShareLinkBody {
-    role: Option<String>,
-}
-
-pub(crate) async fn create_share_link(
-    State(state): State<SharedState>,
-    user: AuthUser,
-    Path(raw): Path<String>,
-    OptionalJsonBody(body): OptionalJsonBody<ShareLinkBody, { crate::MAX_BODY_BYTES }>,
-) -> Result<(StatusCode, Json<CreatedShareLink>), ApiError> {
-    let access = access(&state, user.user_id, &raw).await?;
+/// Create a share link for a shared canvas (any member); `role` must be `None` or `editor`.
+/// `201` over REST.
+pub async fn create_share_link(
+    state: &SharedState,
+    user: &AuthUser,
+    canvas: &str,
+    role: Option<&str>,
+) -> Result<CreatedShareLink, ApiError> {
+    let access = access(state, user.user_id, canvas).await?;
     if access.is_personal() {
         return Err(ApiError::bad_request(
             "the Personal canvas cannot be shared",
         ));
     }
-    match body.role.as_deref() {
+    match role {
         None | Some("editor") => {}
         Some(_) => return Err(ApiError::bad_request("share link role must be editor")),
     }
@@ -974,24 +960,23 @@ pub(crate) async fn create_share_link(
     .fetch_one(&state.db)
     .await?;
     tracing::info!(user_id = %user.user_id, canvas_id = %access.canvas_id, link_id = %id, "canvas share link created");
-    Ok((
-        StatusCode::CREATED,
-        Json(CreatedShareLink {
-            id,
-            token,
-            canvas_id: access.canvas_id,
-            role,
-            created_at,
-        }),
-    ))
+    Ok(CreatedShareLink {
+        id,
+        token,
+        canvas_id: access.canvas_id,
+        role,
+        created_at,
+    })
 }
 
-pub(crate) async fn list_share_links(
-    State(state): State<SharedState>,
-    user: AuthUser,
-    Path(raw): Path<String>,
-) -> Result<Json<Value>, ApiError> {
-    let access = access(&state, user.user_id, &raw).await?;
+/// The canvas's share links, newest first (owner only; never the tokens). REST wraps them
+/// as `{"links":[…]}`.
+pub async fn list_share_links(
+    state: &SharedState,
+    user: &AuthUser,
+    canvas: &str,
+) -> Result<Vec<ShareLinkView>, ApiError> {
+    let access = access(state, user.user_id, canvas).await?;
     if !access.is_owner() {
         return Err(ApiError::Forbidden);
     }
@@ -1003,19 +988,21 @@ pub(crate) async fn list_share_links(
     .bind(access.canvas_id)
     .fetch_all(&state.db)
     .await?;
-    Ok(Json(json!({ "links": links })))
+    Ok(links)
 }
 
-pub(crate) async fn revoke_share_link(
-    State(state): State<SharedState>,
-    user: AuthUser,
-    Path((raw, link_id)): Path<(String, String)>,
-) -> Result<StatusCode, ApiError> {
-    let access = access(&state, user.user_id, &raw).await?;
+/// Revoke one share link (owner only).
+pub async fn revoke_share_link(
+    state: &SharedState,
+    user: &AuthUser,
+    canvas: &str,
+    link_id: &str,
+) -> Result<(), ApiError> {
+    let access = access(state, user.user_id, canvas).await?;
     if !access.is_owner() {
         return Err(ApiError::Forbidden);
     }
-    let link_id = Uuid::parse_str(&link_id).map_err(|_| ApiError::NotFound)?;
+    let link_id = Uuid::parse_str(link_id).map_err(|_| ApiError::NotFound)?;
     let deleted = sqlx::query("DELETE FROM canvas_share_links WHERE id = $1 AND canvas_id = $2")
         .bind(link_id)
         .bind(access.canvas_id)
@@ -1025,15 +1012,16 @@ pub(crate) async fn revoke_share_link(
     if deleted == 0 {
         return Err(ApiError::NotFound);
     }
-    Ok(StatusCode::NO_CONTENT)
+    Ok(())
 }
 
-pub(crate) async fn revoke_all_share_links(
-    State(state): State<SharedState>,
-    user: AuthUser,
-    Path(raw): Path<String>,
-) -> Result<StatusCode, ApiError> {
-    let access = access(&state, user.user_id, &raw).await?;
+/// Revoke every share link of the canvas (owner only).
+pub async fn revoke_all_share_links(
+    state: &SharedState,
+    user: &AuthUser,
+    canvas: &str,
+) -> Result<(), ApiError> {
+    let access = access(state, user.user_id, canvas).await?;
     if !access.is_owner() {
         return Err(ApiError::Forbidden);
     }
@@ -1041,7 +1029,7 @@ pub(crate) async fn revoke_all_share_links(
         .bind(access.canvas_id)
         .execute(&state.db)
         .await?;
-    Ok(StatusCode::NO_CONTENT)
+    Ok(())
 }
 
 async fn share_link_preview_row(
@@ -1062,12 +1050,13 @@ async fn share_link_preview_row(
     .ok_or_else(link_not_found)
 }
 
-pub(crate) async fn preview_share_link(
-    State(state): State<SharedState>,
-    user: AuthUser,
-    Path(token): Path<String>,
-) -> Result<Json<Value>, ApiError> {
-    let row = share_link_preview_row(&state, &token).await?;
+/// What a share link opens (any signed-in user holding the token).
+pub async fn preview_share_link(
+    state: &SharedState,
+    user: &AuthUser,
+    token: &str,
+) -> Result<ShareLinkPreview, ApiError> {
+    let row = share_link_preview_row(state, token).await?;
     let member: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM canvas_members WHERE canvas_id = $1 AND user_id = $2)",
     )
@@ -1075,21 +1064,26 @@ pub(crate) async fn preview_share_link(
     .bind(user.user_id)
     .fetch_one(&state.db)
     .await?;
-    Ok(Json(json!({
-        "canvas_id": row.canvas_id,
-        "name": row.name,
-        "owner": { "id": row.owner_id, "display_name": row.owner_display_name },
-        "role": row.role,
-        "member": member,
-    })))
+    Ok(ShareLinkPreview {
+        canvas_id: row.canvas_id,
+        name: row.name,
+        owner: ShareLinkOwner {
+            id: row.owner_id,
+            display_name: row.owner_display_name,
+        },
+        role: row.role,
+        member,
+    })
 }
 
-pub(crate) async fn join_share_link(
-    State(state): State<SharedState>,
-    user: AuthUser,
-    Path(token): Path<String>,
-) -> Result<Json<CanvasView>, ApiError> {
-    let digest = token_digest(&token).ok_or_else(link_not_found)?;
+/// Join a canvas through a share link (idempotent; never downgrades the owner). Also accepts
+/// the caller's pending invite to it.
+pub async fn join_share_link(
+    state: &SharedState,
+    user: &AuthUser,
+    token: &str,
+) -> Result<CanvasView, ApiError> {
+    let digest = token_digest(token).ok_or_else(link_not_found)?;
     let mut tx = state.db.begin().await?;
     let row: Option<(Uuid, String, String)> = sqlx::query_as(
         "SELECT l.canvas_id, l.role, c.kind FROM canvas_share_links l
@@ -1127,31 +1121,28 @@ pub(crate) async fn join_share_link(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
-    publish_members(&state, canvas_id, "member_added").await;
+    publish_members(state, canvas_id, "member_added").await;
     tracing::info!(user_id = %user.user_id, %canvas_id, joined = added.is_some(), "canvas share link joined");
-    Ok(Json(canvas_view(&state, user.user_id, canvas_id).await?))
+    canvas_view(state, user.user_id, canvas_id).await
 }
 
 // ---------------------------------------------------------------------------------------------
 // People
 
-#[derive(Debug, Default, Deserialize)]
-pub(crate) struct PeopleQuery {
-    q: Option<String>,
+/// Other enabled users matching `q` (display name or email substring; all when empty),
+/// at most `limit` (default 20, capped at 50). REST wraps them as `{"people":[…]}`.
+pub async fn list_people(
+    state: &SharedState,
+    user: &AuthUser,
+    q: Option<&str>,
     limit: Option<i64>,
-}
-
-pub(crate) async fn list_people(
-    State(state): State<SharedState>,
-    user: AuthUser,
-    QueryParams(q): QueryParams<PeopleQuery>,
-) -> Result<Json<Value>, ApiError> {
-    let limit = q.limit.unwrap_or(20);
+) -> Result<Vec<PersonView>, ApiError> {
+    let limit = limit.unwrap_or(20);
     if limit < 1 {
         return Err(ApiError::bad_request("limit must be at least 1"));
     }
     let limit = limit.min(50);
-    let needle = q.q.unwrap_or_default();
+    let needle = q.unwrap_or_default();
     let people = sqlx::query_as::<_, PersonView>(
         "SELECT id, display_name, email FROM users
          WHERE NOT disabled AND id <> $1
@@ -1165,45 +1156,22 @@ pub(crate) async fn list_people(
     .bind(limit)
     .fetch_all(&state.db)
     .await?;
-    Ok(Json(json!({ "people": people })))
+    Ok(people)
 }
 
 // ---------------------------------------------------------------------------------------------
 // Documents
 
-/// `GET /canvases/:id/ws` — upgrade to a y-websocket room.
-pub(crate) async fn ws_upgrade(
-    State(state): State<SharedState>,
-    user: AuthUser,
-    Path(raw): Path<String>,
-    ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
-) -> Result<Response, ApiError> {
-    let a = access(&state, user.user_id, &raw).await?;
-    let ws = ws.map_err(|_| ApiError::bad_request("expected a WebSocket upgrade"))?;
-    let room = rooms().get(a.canvas_id);
-    room.ensure_loaded(&state).await?;
-    let user_id = user.user_id;
-    Ok(ws
-        .max_message_size(MAX_MESSAGE_BYTES)
-        .max_frame_size(MAX_MESSAGE_BYTES)
-        .on_upgrade(move |socket| serve_peer(state, room, user_id, socket))
-        .into_response())
-}
-
-#[derive(Deserialize)]
-pub(crate) struct StateQuery {
-    /// Optional base64 state vector: return only what the caller is missing.
-    sv: Option<String>,
-}
-
-pub(crate) async fn get_state(
-    State(state): State<SharedState>,
-    user: AuthUser,
-    Path(raw): Path<String>,
-    Query(q): Query<StateQuery>,
-) -> Result<Json<Value>, ApiError> {
-    let a = access(&state, user.user_id, &raw).await?;
-    let sv = match q.sv.as_deref().filter(|s| !s.is_empty()) {
+/// The document as one lib0 v1 Yjs update. `sv` (optional base64 state vector): only what
+/// the caller is missing. REST sends `{"state":"<base64>"}`.
+pub async fn get_state(
+    state: &SharedState,
+    user: &AuthUser,
+    canvas: &str,
+    sv: Option<&str>,
+) -> Result<Vec<u8>, ApiError> {
+    let a = access(state, user.user_id, canvas).await?;
+    let sv = match sv.filter(|s| !s.is_empty()) {
         Some(s) => {
             let bytes =
                 ids::b64_decode_any(s).map_err(|_| ApiError::bad_request("sv is not base64"))?;
@@ -1213,43 +1181,49 @@ pub(crate) async fn get_state(
         None => StateVector::default(),
     };
     let room = rooms().get(a.canvas_id);
-    let g = room.read(&state).await?;
+    let g = room.read(state).await?;
     let update = g.doc().transact().encode_state_as_update_v1(&sv);
-    Ok(Json(json!({ "state": STANDARD.encode(update) })))
+    Ok(update)
 }
 
-#[derive(Deserialize)]
-pub(crate) struct ReadQuery {
+/// What [`read_canvas`] returns.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ReadOptions {
+    /// Full text and every field (default: a compact summary).
     #[serde(default)]
-    full: bool,
-    /// Comma-separated shape ids.
-    ids: Option<String>,
-    /// Comma-separated shape types.
-    types: Option<String>,
+    pub full: bool,
+    /// Only these shape ids (`shape:` prefixes are accepted and stripped).
+    #[serde(default)]
+    pub ids: Option<Vec<String>>,
+    /// Only these shape types.
+    #[serde(default)]
+    pub types: Option<Vec<String>>,
 }
 
-fn csv(s: Option<&str>) -> Option<Vec<String>> {
-    s.map(|s| {
-        s.split(',')
+fn clean_list(list: Option<&[String]>) -> Option<Vec<String>> {
+    list.map(|items| {
+        items
+            .iter()
             .map(|p| crate::shape::bare_id(p.trim()).to_owned())
             .filter(|p| !p.is_empty())
             .collect()
     })
 }
 
-pub(crate) async fn read_canvas(
-    State(state): State<SharedState>,
-    user: AuthUser,
-    Path(raw): Path<String>,
-    Query(q): Query<ReadQuery>,
-) -> Result<Json<ReadWithChat>, ApiError> {
-    let a = access(&state, user.user_id, &raw).await?;
+/// The canvas in the agent read format (shapes, connections, agents, the latest chat).
+pub async fn read_canvas(
+    state: &SharedState,
+    user: &AuthUser,
+    canvas: &str,
+    options: &ReadOptions,
+) -> Result<ReadWithChat, ApiError> {
+    let a = access(state, user.user_id, canvas).await?;
     let room = rooms().get(a.canvas_id);
-    let g = room.read(&state).await?;
+    let g = room.read(state).await?;
     let opts = ReadOpts {
-        full: q.full,
-        ids: csv(q.ids.as_deref()),
-        types: csv(q.types.as_deref()),
+        full: options.full,
+        ids: clean_list(options.ids.as_deref()),
+        types: clean_list(options.types.as_deref()),
         now_ms: 0,
     };
     let txn = g.doc().transact();
@@ -1260,54 +1234,90 @@ pub(crate) async fn read_canvas(
         kind: a.kind,
     });
     // The most recent chat messages (0.6.0), so agents can read the conversation too.
-    let chat = read_chat(&txn, READ_CHAT_LIMIT, q.full);
-    Ok(Json(ReadWithChat { read: out, chat }))
+    let chat = read_chat(&txn, READ_CHAT_LIMIT, options.full);
+    Ok(ReadWithChat { read: out, chat })
 }
 
-/// `POST /canvases/:id/ops` — `{ops:[…], as?:{id,name,color}|"name", confirm?, near?:{x,y}}`
-/// or a bare array of ops. Envelope problems are reported like the page does: `200` with
-/// `errors:[{index:-1,…}]`.
-pub(crate) async fn post_ops(
-    State(state): State<SharedState>,
-    user: AuthUser,
-    Path(raw): Path<String>,
-    Body(body): Body<Value>,
-) -> Result<Json<OpsResult>, ApiError> {
-    let a = access(&state, user.user_id, &raw).await?;
-    let (ops, actor, confirm, near) = match body {
-        Value::Array(ops) => (ops, None, false, None),
-        Value::Object(mut o) => {
-            let Some(Value::Array(ops)) = o.remove("ops") else {
-                return Ok(Json(OpsResult::request_error("`ops` must be an array")));
-            };
-            let actor = match Actor::parse(o.get("as")) {
-                Ok(actor) => actor,
-                Err(e) => return Ok(Json(OpsResult::request_error(e))),
-            };
-            let near = o.get("near").and_then(|n| {
-                Some(Point {
-                    x: n.get("x")?.as_f64()?,
-                    y: n.get("y")?.as_f64()?,
-                })
-            });
-            (
+/// One ops call: the ops plus who is writing (`as`), where to place shapes without a
+/// position (`near`) and whether `clear` is confirmed.
+#[derive(Debug, Clone, Default)]
+pub struct OpsRequest {
+    pub ops: Vec<Value>,
+    /// The agent the ops are attributed to (`as`); `None` = the caller.
+    pub actor: Option<Actor>,
+    /// `confirm: true` — unlocks `clear`.
+    pub confirm: bool,
+    /// Auto-placement looks for free space near this point (default the origin).
+    pub near: Option<Point>,
+}
+
+impl OpsRequest {
+    /// Parses the `POST /canvases/:id/ops` body: `{ops:[…], as?:{id,name,color}|"name",
+    /// confirm?, near?:{x,y}}` or a bare array of ops. `Err` is the envelope problem, which
+    /// the REST API reports like the page does: `200` with `errors:[{index:-1,…}]` (see
+    /// [`OpsResult::request_error`]).
+    pub fn from_json(body: Value) -> Result<Self, String> {
+        match body {
+            Value::Array(ops) => Ok(Self {
                 ops,
-                actor,
-                o.get("confirm") == Some(&Value::Bool(true)),
-                near,
-            )
+                ..Self::default()
+            }),
+            Value::Object(mut o) => {
+                let Some(Value::Array(ops)) = o.remove("ops") else {
+                    return Err("`ops` must be an array".into());
+                };
+                let actor = Actor::parse(o.get("as"))?;
+                let near = o.get("near").and_then(|n| {
+                    Some(Point {
+                        x: n.get("x")?.as_f64()?,
+                        y: n.get("y")?.as_f64()?,
+                    })
+                });
+                Ok(Self {
+                    ops,
+                    actor,
+                    confirm: o.get("confirm") == Some(&Value::Bool(true)),
+                    near,
+                })
+            }
+            _ => Err("expected {ops:[...], as?:{id,name,color}} or an array of ops".into()),
         }
-        _ => {
-            return Ok(Json(OpsResult::request_error(
-                "expected {ops:[...], as?:{id,name,color}} or an array of ops",
-            )))
-        }
-    };
+    }
+}
+
+/// Apply canvas ops in one transaction (persisted and broadcast to the room). Per-op
+/// problems are reported in [`OpsResult::errors`], not as an `Err`.
+pub async fn apply_ops(
+    state: &SharedState,
+    user: &AuthUser,
+    canvas: &str,
+    request: OpsRequest,
+) -> Result<OpsResult, ApiError> {
+    let a = access(state, user.user_id, canvas).await?;
+    apply_ops_at(state, user, a, request).await
+}
+
+/// [`apply_ops`] once access is established (REST checks membership before parsing the
+/// envelope, so a stranger gets 404 even for a malformed body).
+pub(crate) async fn apply_ops_at(
+    state: &SharedState,
+    user: &AuthUser,
+    a: Access,
+    request: OpsRequest,
+) -> Result<OpsResult, ApiError> {
+    let OpsRequest {
+        ops,
+        actor,
+        confirm,
+        near,
+    } = request;
     let by = match &actor {
         Some(actor) => actor.name.clone(),
-        None => display_name(&state, &user).await?,
+        None => display_name(state, user).await?,
     };
     let mut ctx = OpsCtx::new(by);
+    ctx.extra_url_schemes
+        .clone_from(&state.cfg.ops.extra_url_schemes);
     // Checklist picks say who made them: the agent named in `as`, else the caller.
     ctx.by_id = actor
         .as_ref()
@@ -1319,7 +1329,7 @@ pub(crate) async fn post_ops(
 
     let room = rooms().get(a.canvas_id);
     let (result, wrote) = room
-        .transact(&state, SERVER_ORIGIN, |txn| {
+        .transact(state, SERVER_ORIGIN, |txn| {
             let shapes = txn.get_or_insert_map(SHAPES);
             let result = apply_json_ops(txn, &shapes, &ops, &ctx);
             let wrote = match &actor {
@@ -1340,7 +1350,7 @@ pub(crate) async fn post_ops(
         })
         .await?;
     if let (Some(actor), Some(at)) = (actor, wrote) {
-        schedule_idle(Arc::clone(&state), a.canvas_id, actor.id, at);
+        schedule_idle(Arc::clone(state), a.canvas_id, actor.id, at);
     }
     tracing::debug!(
         user_id = %user.user_id,
@@ -1349,7 +1359,7 @@ pub(crate) async fn post_ops(
         errors = result.errors.len(),
         "canvas ops applied"
     );
-    Ok(Json(result))
+    Ok(result)
 }
 
 /// After [`WRITING_MS`], flips the agent back to `idle` unless it wrote again since.
@@ -1385,162 +1395,9 @@ fn schedule_idle(state: SharedState, canvas_id: Uuid, agent_id: String, written_
     });
 }
 
-// ---------------------------------------------------------------------------------------------
-// Ungated web landing page
-
-fn escape_html(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
-}
-
-fn percent_encode_component(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
-            out.push(char::from(byte));
-        } else {
-            use std::fmt::Write as _;
-            let _ = write!(out, "%{byte:02X}");
-        }
-    }
-    out
-}
-
-/// Accept only a host name/IP and an optional numeric port. In particular, reject user-info,
-/// paths and control characters before putting the value in a custom URL scheme.
-fn validated_host(headers: &HeaderMap, uri: &Uri) -> Option<String> {
-    // HTTP/1.1 carries the target in a literal `Host` header; HTTP/2 (our
-    // only transport once TLS is on, since rustls negotiates h2 by ALPN)
-    // forbids that header and sends `:authority` instead, which hyper/h2
-    // surface as the request URI's authority, not a header — so a host
-    // taken from headers alone is always absent on this listener.
-    let from_header = headers
-        .get(header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_owned);
-    let from_authority = uri.authority().map(|a| a.as_str().to_owned());
-    let raw = from_header.or(from_authority)?;
-    let raw = raw.as_str();
-    if raw.is_empty()
-        || raw.trim() != raw
-        || raw.chars().any(|c| c.is_control() || c.is_whitespace())
-    {
-        return None;
-    }
-    if raw.contains(['@', '/', '?', '#', '%']) {
-        return None;
-    }
-    let host = if let Some(rest) = raw.strip_prefix('[') {
-        let end = rest.find(']')?;
-        let host = &rest[..end];
-        let suffix = &rest[end + 1..];
-        if suffix.is_empty() {
-            host
-        } else {
-            let port = suffix.strip_prefix(':').filter(|p| !p.is_empty())?;
-            if port.parse::<u16>().is_err() {
-                return None;
-            }
-            host
-        }
-    } else {
-        if raw.matches(':').count() > 1 {
-            return None;
-        }
-        match raw.rsplit_once(':') {
-            Some((host, port)) if !port.is_empty() => {
-                if port.parse::<u16>().is_err() {
-                    return None;
-                }
-                host
-            }
-            Some((_, _)) => return None,
-            None => raw,
-        }
-    };
-    if host.is_empty()
-        || host.parse::<std::net::IpAddr>().is_err() && url::Host::parse(host).is_err()
-    {
-        return None;
-    }
-    Some(raw.to_owned())
-}
-
-/// `GET /join/:token` deliberately does not consult the database. It is outside `/v1`, so it is
-/// reachable before a client has an instance key and can hand the opaque token to Copper.
-pub(crate) async fn join_landing(
-    Path(token): Path<String>,
-    uri: Uri,
-    headers: HeaderMap,
-) -> Response {
-    let href = token_digest(&token).and_then(|_| {
-        validated_host(&headers, &uri).map(|host| {
-            format!(
-                "copper://canvas/join/{}?cloud={}",
-                percent_encode_component(&token),
-                host
-            )
-        })
-    });
-    let html = match href {
-        Some(href) => format!(
-            "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Open canvas in Copper</title><style>body{{margin:0;min-height:100vh;display:grid;place-items:center;background:#f7f7f5;color:#171717;font:16px system-ui,sans-serif}}main{{max-width:28rem;padding:2rem;text-align:center}}a{{display:inline-block;padding:.75rem 1.1rem;border-radius:.5rem;background:#171717;color:#fff;text-decoration:none}}a:focus-visible{{outline:3px solid #6d5dfc;outline-offset:3px}}</style></head><body><main><h1>Canvas share link</h1><p>Open this canvas in Copper to continue.</p><a href=\"{}\">Open this canvas in Copper</a></main></body></html>",
-            escape_html(&href)
-        ),
-        None => "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Open canvas in Copper</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f7f7f5;color:#171717;font:16px system-ui,sans-serif}main{max-width:28rem;padding:2rem;text-align:center}</style></head><body><main><h1>Canvas share link</h1><p>Open this link in Copper to continue.</p></main></body></html>".to_owned(),
-    };
-    let mut response = Html(html).into_response();
-    let headers = response.headers_mut();
-    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    headers.insert(
-        header::REFERRER_POLICY,
-        HeaderValue::from_static("no-referrer"),
-    );
-    headers.insert(
-        header::X_CONTENT_TYPE_OPTIONS,
-        HeaderValue::from_static("nosniff"),
-    );
-    headers.insert(
-        header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static("default-src 'none'; style-src 'unsafe-inline'"),
-    );
-    response
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn host_falls_back_to_authority_when_no_host_header() {
-        // HTTP/2 requests never carry a literal `Host` header (RFC 9113 §8.3.1
-        // forbids it); hyper/h2 surface the `:authority` pseudo-header as the
-        // request URI's authority instead. The join landing page is only ever
-        // served over h2 once TLS is on, so this path must work from the URI
-        // alone, not just from headers.
-        let empty = HeaderMap::new();
-        let uri: Uri = "https://127.0.0.1:8445/join/abc".parse().unwrap();
-        assert_eq!(
-            validated_host(&empty, &uri).as_deref(),
-            Some("127.0.0.1:8445")
-        );
-
-        // A literal Host header (HTTP/1.1) still wins when present.
-        let mut headers = HeaderMap::new();
-        headers.insert(header::HOST, HeaderValue::from_static("example.com"));
-        assert_eq!(
-            validated_host(&headers, &uri).as_deref(),
-            Some("example.com")
-        );
-
-        // Neither a header nor a URI authority: no host to offer.
-        let relative: Uri = "/join/abc".parse().unwrap();
-        assert_eq!(validated_host(&empty, &relative), None);
-    }
 
     #[test]
     fn names() {

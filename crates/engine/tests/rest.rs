@@ -116,7 +116,7 @@ async fn personal_canvas_is_automatic_unique_and_unshareable() {
         let state = app.state.clone();
         let uid = a.id;
         tasks.push(tokio::spawn(async move {
-            copper_cloud_canvas::ensure_personal_canvas(&state, uid)
+            canvas_cloud_engine::ensure_personal_canvas(&state, uid)
                 .await
                 .unwrap()
         }));
@@ -304,11 +304,11 @@ async fn invite_accept_decline_and_leave() {
 
 /// Drains the `canvas` events queued for one subscriber: `(canvas_id, kind)` pairs.
 fn canvas_events(
-    rx: &mut tokio::sync::broadcast::Receiver<copper_cloud_core::events::Event>,
+    rx: &mut tokio::sync::broadcast::Receiver<canvas_cloud_core::events::Event>,
 ) -> Vec<(String, String)> {
     let mut out = Vec::new();
     while let Ok(ev) = rx.try_recv() {
-        if let copper_cloud_core::events::Event::Canvas { canvas_id, kind } = ev {
+        if let canvas_cloud_core::events::Event::Canvas { canvas_id, kind } = ev {
             out.push((canvas_id.to_string(), kind));
         }
     }
@@ -335,7 +335,7 @@ async fn age_invite(app: &TestApp, invite: &str) {
 
 #[tokio::test]
 async fn reinvite_nudges_the_invitee_at_most_every_30_seconds() {
-    assert_eq!(copper_cloud_canvas::INVITE_NUDGE_INTERVAL_SECS, 30);
+    assert_eq!(canvas_cloud_engine::INVITE_NUDGE_INTERVAL_SECS, 30);
     let app = TestApp::new().await;
     let a = app.user("owner").await;
     let b = app.user("bob").await;
@@ -699,7 +699,7 @@ async fn share_links_people_and_landing() {
             .unwrap();
     assert_eq!(
         stored.as_slice(),
-        &copper_cloud_core::ids::sha256(token.as_bytes())
+        &canvas_cloud_core::ids::sha256(token.as_bytes())
     );
     assert_ne!(stored.as_slice(), token.as_bytes());
 
@@ -808,6 +808,15 @@ async fn share_links_people_and_landing() {
         .await;
     assert_eq!(s, StatusCode::NOT_FOUND);
 
+    // Without `web_app_url` the landing page links nowhere (and never echoes the token).
+    let html = landing(&app, &token).await;
+    assert!(html.contains("Open this link in your canvas app"));
+    assert!(!html.contains(&token));
+    assert!(!html.contains("href="));
+}
+
+/// `GET /join/{token}` through the app: checks the hardening headers, returns the HTML.
+async fn landing(app: &TestApp, token: &str) -> String {
     let req = Request::builder()
         .method(Method::GET)
         .uri(format!("/join/{token}"))
@@ -824,31 +833,29 @@ async fn share_links_people_and_landing() {
         "default-src 'none'; style-src 'unsafe-inline'"
     );
     let body = response.into_body().collect().await.unwrap().to_bytes();
-    let html = String::from_utf8(body.to_vec()).unwrap();
-    assert!(html.contains("copper://canvas/join/"));
-    assert!(html.contains("cloud=cloud.example:443"));
+    String::from_utf8(body.to_vec()).unwrap()
+}
 
-    let req = Request::builder()
-        .method(Method::GET)
-        .uri(format!("/join/{token}"))
-        .header("host", "[::1]")
-        .body(Body::empty())
-        .unwrap();
-    let response = app.router.clone().oneshot(req).await.unwrap();
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    let html = String::from_utf8(body.to_vec()).unwrap();
-    assert!(html.contains("cloud=[::1]"));
-
-    let req = Request::builder()
-        .method(Method::GET)
-        .uri(format!("/join/{token}"))
-        .header("host", "<bad>")
-        .body(Body::empty())
-        .unwrap();
-    let response = app.router.clone().oneshot(req).await.unwrap();
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    let html = String::from_utf8(body.to_vec()).unwrap();
-    assert!(!html.contains("copper://"));
+#[tokio::test]
+async fn join_landing_hands_the_token_to_the_web_app() {
+    let app = TestApp::with(|cfg| {
+        cfg.web_app_url = Some("https://canvas.example.test/join?t={token}&x=1".into());
+    })
+    .await;
+    let owner = app.user("lander").await;
+    let id = app.canvas(&owner, "Landing").await;
+    let (s, link) = app
+        .post(&owner, &format!("/canvases/{id}/links"), json!({}))
+        .await;
+    assert_eq!(s, StatusCode::CREATED, "{link}");
+    let token = link["token"].as_str().unwrap();
+    let html = landing(&app, token).await;
+    let href = format!("https://canvas.example.test/join?t={token}&amp;x=1");
+    assert!(html.contains(&format!("href=\"{href}\"")), "{html}");
+    assert!(html.contains(&format!("url={href}")), "{html}");
+    // A malformed token is not forwarded; markup in it is never echoed.
+    let html = landing(&app, "%3Cbad%3E").await;
+    assert!(!html.contains("canvas.example.test"));
     assert!(!html.contains("<bad>"));
 }
 
@@ -863,7 +870,7 @@ async fn bodies_are_bounded() {
     let app = TestApp::new().await;
     let a = app.user("big").await;
     let id = app.canvas(&a, "Big").await;
-    let huge = "z".repeat(copper_cloud_canvas::MAX_OPS_BODY_BYTES + 10);
+    let huge = "z".repeat(canvas_cloud_engine::MAX_OPS_BODY_BYTES + 10);
     let (s, v) = app
         .post(
             &a,
@@ -876,7 +883,7 @@ async fn bodies_are_bounded() {
         .post(
             &a,
             "/canvases",
-            json!({ "name": "z".repeat(copper_cloud_canvas::MAX_BODY_BYTES) }),
+            json!({ "name": "z".repeat(canvas_cloud_engine::MAX_BODY_BYTES) }),
         )
         .await;
     assert_eq!(s, StatusCode::PAYLOAD_TOO_LARGE, "{v}");
@@ -916,7 +923,6 @@ async fn bodies_are_bounded() {
     let req = axum::http::Request::builder()
         .method(Method::POST)
         .uri(format!("/v1/canvases/{id}/ops"))
-        .header("x-copper-instance", &app.instance_key)
         .header("authorization", format!("Bearer {}", a.token))
         .body(axum::body::Body::from("{nope"))
         .unwrap();

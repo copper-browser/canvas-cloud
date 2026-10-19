@@ -1,7 +1,7 @@
 //! Chat @mentions on shared canvases (0.6.0).
 //!
 //! The chat lives in the canvas document ([`crate::chat`]); the server only learns who was
-//! mentioned when the sender's Copper reports it:
+//! mentioned when the sender's client reports it:
 //!
 //! * `POST /canvases/{id}/mentions {message_id, user_ids, excerpt}` — one row per recipient
 //!   that is a member of the canvas (the sender excluded), idempotent per
@@ -9,8 +9,8 @@
 //!   `mention`.
 //! * `GET /mentions?unread=1&limit=n` — the caller's mentions on canvases they can still see,
 //!   newest first.
-//! * `POST /mentions/read {ids}|{canvas_id}` — marks them read; the caller's other devices get
-//!   a `canvas` event, kind `mention_read`, per canvas touched.
+//! * `POST /mentions/read {ids}|{canvas_id}` — marks them read; the caller's other clients
+//!   get a `canvas` event, kind `mention_read`, per canvas touched.
 //!
 //! Excerpts are sealed under the canvas doc key (like the document itself), with AAD
 //! [`EXCERPT_AAD_PREFIX`] ‖ the row id.
@@ -20,20 +20,17 @@ use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::LazyLock;
 
-use axum::extract::{Path, State};
-use axum::Json;
-use copper_cloud_core::auth::AuthUser;
-use copper_cloud_core::crypto::Crypto;
-use copper_cloud_core::error::ApiError;
-use copper_cloud_core::extract::QueryParams;
-use copper_cloud_core::ids;
-use copper_cloud_core::state::SharedState;
+use canvas_cloud_core::crypto::Crypto;
+use canvas_cloud_core::error::ApiError;
+use canvas_cloud_core::identity::AuthUser;
+use canvas_cloud_core::ids;
+use canvas_cloud_core::state::SharedState;
 use governor::{DefaultKeyedRateLimiter, Quota, RateLimiter};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::rest::{access, publish, Body, UserRef};
+use crate::rest::{access, publish, UserRef};
 use crate::store;
 
 /// Longest excerpt stored (characters); longer ones are cut.
@@ -52,7 +49,7 @@ pub const MAX_READ_IDS: usize = 500;
 /// one every `60 / n` s).
 pub const MENTION_POSTS_PER_MINUTE: u32 = 60;
 /// AAD prefix of a sealed excerpt (followed by the mention row id's 16 raw bytes).
-pub const EXCERPT_AAD_PREFIX: &[u8] = b"copper-cloud/v1/mention:";
+pub const EXCERPT_AAD_PREFIX: &[u8] = b"canvas-cloud/v1/mention:";
 
 /// SSE `canvas` event kind sent to each newly mentioned member.
 pub const KIND_MENTION: &str = "mention";
@@ -131,13 +128,17 @@ fn message_id(raw: &str) -> Result<String, ApiError> {
 // ---------------------------------------------------------------------------------------------
 // POST /canvases/{id}/mentions
 
-#[derive(Deserialize)]
-pub(crate) struct MentionBody {
-    message_id: String,
+/// `POST /canvases/{id}/mentions` body.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct MentionBody {
+    /// The chat message's id (opaque, 1–128 characters).
+    pub message_id: String,
+    /// Who was mentioned.
     #[serde(default)]
-    user_ids: Vec<Uuid>,
+    pub user_ids: Vec<Uuid>,
+    /// Preview text (cut to [`MAX_EXCERPT_CHARS`], stored sealed).
     #[serde(default)]
-    excerpt: String,
+    pub excerpt: String,
 }
 
 /// `POST /canvases/{id}/mentions` response.
@@ -150,13 +151,14 @@ pub struct MentionsSent {
     pub skipped: Vec<Uuid>,
 }
 
-pub(crate) async fn post_mentions(
-    State(state): State<SharedState>,
-    user: AuthUser,
-    Path(raw): Path<String>,
-    Body(body): Body<MentionBody>,
-) -> Result<Json<MentionsSent>, ApiError> {
-    let a = access(&state, user.user_id, &raw).await?;
+/// Record who a chat message mentions (see the module docs).
+pub async fn post_mentions(
+    state: &SharedState,
+    user: &AuthUser,
+    canvas: &str,
+    body: MentionBody,
+) -> Result<MentionsSent, ApiError> {
+    let a = access(state, user.user_id, canvas).await?;
     if a.kind == "personal" {
         return Err(ApiError::bad_request("the Personal canvas has no chat"));
     }
@@ -179,10 +181,10 @@ pub(crate) async fn post_mentions(
         .filter(|u| seen.insert(*u))
         .collect();
     if wanted.is_empty() {
-        return Ok(Json(MentionsSent {
+        return Ok(MentionsSent {
             notified: Vec::new(),
             skipped: Vec::new(),
-        }));
+        });
     }
 
     // Seal an excerpt for every candidate row up front (≤ 100, microseconds), so membership
@@ -222,7 +224,7 @@ pub(crate) async fn post_mentions(
     let fresh: Vec<Uuid> = rows.iter().filter(|r| r.1).map(|r| r.0).collect();
     let (notified, skipped): (Vec<Uuid>, Vec<Uuid>) =
         wanted.into_iter().partition(|u| mentioned.contains(u));
-    publish(&state, &fresh, a.canvas_id, KIND_MENTION);
+    publish(state, &fresh, a.canvas_id, KIND_MENTION);
     metrics::counter!("canvas_mentions_total").increment(fresh.len() as u64);
     tracing::info!(
         user_id = %user.user_id,
@@ -232,17 +234,11 @@ pub(crate) async fn post_mentions(
         skipped = skipped.len(),
         "canvas chat mentions"
     );
-    Ok(Json(MentionsSent { notified, skipped }))
+    Ok(MentionsSent { notified, skipped })
 }
 
 // ---------------------------------------------------------------------------------------------
 // GET /mentions
-
-#[derive(Debug, Default, Deserialize)]
-pub(crate) struct MentionsQuery {
-    unread: Option<String>,
-    limit: Option<i64>,
-}
 
 /// `{id, name}` of the canvas a mention is on.
 #[derive(Debug, Clone, Serialize)]
@@ -288,7 +284,8 @@ struct MentionRow {
     read_at: Option<OffsetDateTime>,
 }
 
-fn flag(raw: Option<&str>) -> Result<bool, ApiError> {
+/// The `unread` query flag: `1`/`true`/`yes` or `0`/`false`/`no`/empty.
+pub(crate) fn flag(raw: Option<&str>) -> Result<bool, ApiError> {
     match raw.map(str::trim) {
         None | Some("" | "0" | "false" | "no") => Ok(false),
         Some("1" | "true" | "yes") => Ok(true),
@@ -296,13 +293,16 @@ fn flag(raw: Option<&str>) -> Result<bool, ApiError> {
     }
 }
 
-pub(crate) async fn list_mentions(
-    State(state): State<SharedState>,
-    user: AuthUser,
-    QueryParams(q): QueryParams<MentionsQuery>,
-) -> Result<Json<MentionList>, ApiError> {
-    let unread_only = flag(q.unread.as_deref())?;
-    let limit = q.limit.unwrap_or(DEFAULT_MENTIONS_LIMIT);
+/// The caller's mentions on canvases they can still see, newest first: only unread ones when
+/// `unread_only`; at most `limit` (default [`DEFAULT_MENTIONS_LIMIT`], capped at
+/// [`MAX_MENTIONS_LIMIT`]).
+pub async fn list_mentions(
+    state: &SharedState,
+    user: &AuthUser,
+    unread_only: bool,
+    limit: Option<i64>,
+) -> Result<MentionList, ApiError> {
+    let limit = limit.unwrap_or(DEFAULT_MENTIONS_LIMIT);
     if limit < 1 {
         return Err(ApiError::bad_request("limit must be at least 1"));
     }
@@ -368,18 +368,19 @@ pub(crate) async fn list_mentions(
             read_at: r.read_at,
         });
     }
-    Ok(Json(MentionList { mentions, unread }))
+    Ok(MentionList { mentions, unread })
 }
 
 // ---------------------------------------------------------------------------------------------
 // POST /mentions/read
 
-#[derive(Deserialize)]
-pub(crate) struct ReadBody {
+/// `POST /mentions/read` body: mentions by id, or every mention on one canvas (or both).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct MarkReadBody {
     #[serde(default)]
-    ids: Option<Vec<Uuid>>,
+    pub ids: Option<Vec<Uuid>>,
     #[serde(default)]
-    canvas_id: Option<Uuid>,
+    pub canvas_id: Option<Uuid>,
 }
 
 /// `POST /mentions/read` response.
@@ -390,11 +391,12 @@ pub struct MentionsRead {
     pub updated: usize,
 }
 
-pub(crate) async fn mark_read(
-    State(state): State<SharedState>,
-    user: AuthUser,
-    Body(body): Body<ReadBody>,
-) -> Result<Json<MentionsRead>, ApiError> {
+/// Mark the caller's mentions read (see [`MarkReadBody`]).
+pub async fn mark_read(
+    state: &SharedState,
+    user: &AuthUser,
+    body: MarkReadBody,
+) -> Result<MentionsRead, ApiError> {
     if body.ids.is_none() && body.canvas_id.is_none() {
         return Err(ApiError::bad_request("send ids or canvas_id"));
     }
@@ -419,12 +421,12 @@ pub(crate) async fn mark_read(
     .await?;
     let canvases: HashSet<Uuid> = touched.iter().copied().collect();
     for canvas_id in canvases {
-        publish(&state, &[user.user_id], canvas_id, KIND_MENTION_READ);
+        publish(state, &[user.user_id], canvas_id, KIND_MENTION_READ);
     }
-    Ok(Json(MentionsRead {
+    Ok(MentionsRead {
         ok: true,
         updated: touched.len(),
-    }))
+    })
 }
 
 #[cfg(test)]

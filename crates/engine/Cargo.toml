@@ -1,6 +1,6 @@
 [package]
-name = "copper-cloud-canvas"
-description = "Canvases REST API and Yjs WebSocket rooms for copper-cloud"
+name = "canvas-cloud-engine"
+description = "Canvas Cloud engine: canvases REST API, service API and Yjs WebSocket rooms"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -15,7 +15,7 @@ publish = false
 workspace = true
 
 [dependencies]
-copper-cloud-core.workspace = true
+canvas-cloud-core.workspace = true
 anyhow.workspace = true
 axum.workspace = true
 base64.workspace = true
@@ -29,13 +29,11 @@ sqlx.workspace = true
 time.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-url = "2"
+url.workspace = true
 uuid.workspace = true
-# yrs ≥ 0.18 ships the y-sync protocol (DefaultProtocol, Awareness, sync::Message) as
-# `yrs::sync`; the standalone `y-sync` crate is frozen on yrs 0.17.
-yrs = { version = "0.28", features = ["sync"] }
+yrs.workspace = true
 
 [dev-dependencies]
-tokio-tungstenite = "0.29"
+tokio-tungstenite.workspace = true
 tower.workspace = true
 http-body-util.workspace = true

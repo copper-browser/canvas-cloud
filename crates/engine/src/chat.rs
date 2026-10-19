@@ -1,5 +1,5 @@
 //! Canvas chat (0.6.0) as the server sees it: a top-level `Y.Array` named `chat` in the canvas
-//! document, owned and written by Copper. Each element is a plain object
+//! document, owned and written by clients. Each element is a plain object
 //! `{id, authorId, authorName, text, mentions: [userId], at, editedAt?, deleted?}` (`at` and
 //! `editedAt` are ms epoch). The server never writes it: rooms persist and relay it like any
 //! other part of the document, and `GET /canvases/{id}/read` includes the most recent messages

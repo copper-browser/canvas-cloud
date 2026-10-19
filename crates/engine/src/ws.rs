@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use axum::extract::ws::{CloseFrame, Message as WsMessage, Utf8Bytes, WebSocket};
 use bytes::Bytes;
-use copper_cloud_core::error::ApiError;
-use copper_cloud_core::state::SharedState;
+use canvas_cloud_core::error::ApiError;
+use canvas_cloud_core::state::SharedState;
 use futures::stream::SplitSink;
 use futures::{SinkExt as _, StreamExt as _};
 use tokio::sync::{broadcast, mpsc};
@@ -208,7 +208,7 @@ async fn write_loop(
     peer: u64,
     user: Uuid,
 ) {
-    let mut shutdown = copper_cloud_core::shutdown::subscribe();
+    let mut shutdown = canvas_cloud_core::shutdown::subscribe();
     let mut ping = tokio::time::interval_at(tokio::time::Instant::now() + PING_EVERY, PING_EVERY);
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let close_with = loop {
@@ -235,7 +235,7 @@ async fn write_loop(
                 Err(broadcast::error::RecvError::Closed) => break Some((close::GOING_AWAY, "")),
             },
             _ = ping.tick() => WsMessage::Ping(Bytes::new()),
-            () = copper_cloud_core::shutdown::wait(&mut shutdown) => {
+            () = canvas_cloud_core::shutdown::wait(&mut shutdown) => {
                 break Some((close::GOING_AWAY, "server shutting down"));
             }
         };

@@ -2,8 +2,8 @@
 //! `Canvas/src/ops.ts`), run with Bun. Ignored by default; run with
 //!
 //! ```sh
-//! COPPER_CANVAS_DIR=~/src/copper-canvasweb/Canvas \
-//!   cargo test -p copper-cloud-canvas --test js_interop -- --ignored
+//! CANVAS_PAGE_DIR=path/to/Canvas \
+//!   cargo test -p canvas-cloud-engine --test js_interop -- --ignored
 //! ```
 //!
 //! It proves: a stock `y-websocket` `WebsocketProvider` syncs through the room both ways,
@@ -30,17 +30,12 @@ import { WebsocketProvider } from 'y-websocket'
 const CANVAS = process.env.CANVAS_DIR
 const { CanvasStore } = await import(`${CANVAS}/src/canvas/doc.ts`)
 const { applyOps, readCanvas } = await import(`${CANVAS}/src/ops.ts`)
-const { WS_BASE, CANVAS_ID, TOKEN_A, TOKEN_B, KEY } = process.env
+const { WS_BASE, CANVAS_ID, TOKEN_A, TOKEN_B } = process.env
 
-class WS extends WebSocket {
-  constructor(url, _protocols) {
-    super(url, { headers: { 'x-copper-instance': KEY } })
-  }
-}
 function connect(token) {
   const doc = new Y.Doc()
   const provider = new WebsocketProvider(WS_BASE, `${CANVAS_ID}/ws`, doc, {
-    WebSocketPolyfill: WS,
+    WebSocketPolyfill: WebSocket,
     params: { token },
     disableBc: true,
   })
@@ -110,14 +105,14 @@ fn shapes_of(read: &Value) -> Vec<Value> {
 }
 
 #[tokio::test]
-#[ignore = "needs bun and COPPER_CANVAS_DIR (the canvas page sources with node_modules)"]
+#[ignore = "needs bun and CANVAS_PAGE_DIR (the canvas page sources with node_modules)"]
 async fn real_y_websocket_and_page_ops_interoperate() {
-    let Some(canvas_dir) = std::env::var_os("COPPER_CANVAS_DIR").map(PathBuf::from) else {
-        eprintln!("COPPER_CANVAS_DIR not set; skipping");
+    let Some(canvas_dir) = std::env::var_os("CANVAS_PAGE_DIR").map(PathBuf::from) else {
+        eprintln!("CANVAS_PAGE_DIR not set; skipping");
         return;
     };
     let canvas_dir = canvas_dir.canonicalize().unwrap();
-    let work = std::env::temp_dir().join(format!("copper-canvas-interop-{}", uuid::Uuid::now_v7()));
+    let work = std::env::temp_dir().join(format!("canvas-interop-{}", uuid::Uuid::now_v7()));
     std::fs::create_dir_all(&work).unwrap();
     std::os::unix::fs::symlink(canvas_dir.join("node_modules"), work.join("node_modules")).unwrap();
     std::fs::write(work.join("interop.mjs"), SCRIPT).unwrap();
@@ -156,7 +151,6 @@ async fn real_y_websocket_and_page_ops_interoperate() {
         .env("CANVAS_ID", &id)
         .env("TOKEN_A", &a.token)
         .env("TOKEN_B", &b.token)
-        .env("KEY", &app.instance_key)
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .kill_on_drop(true)

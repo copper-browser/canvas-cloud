@@ -359,6 +359,7 @@ mod tests {
             now_ms: 7,
             confirm_clear: false,
             origin: Point { x: 0.0, y: 0.0 },
+            extra_url_schemes: Vec::new(),
         }
     }
 

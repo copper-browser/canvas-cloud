@@ -7,11 +7,11 @@
 mod common;
 
 use axum::http::{Method, StatusCode};
-use common::{TestApp, User};
-use copper_cloud_canvas::mentions::{
+use canvas_cloud_core::events::Event;
+use canvas_cloud_engine::mentions::{
     MAX_MENTIONS_LIMIT, MAX_MENTION_TARGETS, MENTION_POSTS_PER_MINUTE,
 };
-use copper_cloud_core::events::Event;
+use common::{TestApp, User};
 use serde_json::{json, Value};
 use tokio::sync::broadcast::Receiver;
 use uuid::Uuid;
@@ -410,7 +410,9 @@ async fn posting_mentions_is_rate_limited_per_user() {
     app.share(&ann, &id, &ben).await;
     let path = format!("/canvases/{id}/mentions");
     let mut limited = None;
-    for i in 0..=MENTION_POSTS_PER_MINUTE {
+    // The quota refills one post a second, so a slow (loaded) machine earns a few extra posts
+    // while the loop runs: allow some slack past the burst, but the burst itself must pass.
+    for i in 0..MENTION_POSTS_PER_MINUTE + 30 {
         let (st, v) = app
             .post(
                 &ann,
@@ -425,7 +427,11 @@ async fn posting_mentions_is_rate_limited_per_user() {
         }
         assert_eq!(st, StatusCode::OK, "{v}");
     }
-    assert_eq!(limited, Some(MENTION_POSTS_PER_MINUTE), "burst then 429");
+    let limited = limited.expect("429 after the burst");
+    assert!(
+        limited >= MENTION_POSTS_PER_MINUTE,
+        "burst then 429: {limited}"
+    );
     // Per user: Ben is unaffected.
     let v = mention(&app, &ben, &id, "ben-1", &[&ann], "hi").await;
     assert_eq!(ids(&v["notified"]), vec![s(&ann)]);

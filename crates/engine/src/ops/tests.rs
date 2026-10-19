@@ -11,6 +11,7 @@ fn ctx() -> OpsCtx {
         now_ms: 1_000,
         confirm_clear: false,
         origin: Point { x: 0.0, y: 0.0 },
+        extra_url_schemes: Vec::new(),
     }
 }
 
@@ -532,12 +533,23 @@ fn actors_and_presence() {
 #[test]
 fn url_and_src_validation() {
     assert_eq!(
-        valid_url(&json!("example.com")).unwrap(),
+        valid_url(&json!("example.com"), &[]).unwrap(),
         "https://example.com/"
     );
-    assert_eq!(valid_url(&json!("mailto:a@b.c")).unwrap(), "mailto:a@b.c");
-    assert!(valid_url(&json!("ftp://x")).unwrap_err().contains("ftp:"));
-    assert!(valid_url(&json!("  ")).is_err());
+    assert_eq!(
+        valid_url(&json!("mailto:a@b.c"), &[]).unwrap(),
+        "mailto:a@b.c"
+    );
+    assert!(valid_url(&json!("ftp://x"), &[])
+        .unwrap_err()
+        .contains("ftp:"));
+    assert!(valid_url(&json!("  "), &[]).is_err());
+    // No app-specific scheme is built in; the server config adds them.
+    assert!(valid_url(&json!("myapp://canvas/1"), &[]).is_err());
+    assert_eq!(
+        valid_url(&json!("myapp://canvas/1"), &["myapp".to_owned()]).unwrap(),
+        "myapp://canvas/1"
+    );
     assert!(valid_image_src(&json!("data:image/png;base64,AA")).is_ok());
     assert!(valid_image_src(&json!("data:text/html,<b>")).is_err());
     assert!(valid_image_src(&json!("https://a.b/c d.png")).is_err());

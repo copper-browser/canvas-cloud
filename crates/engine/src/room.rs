@@ -17,9 +17,9 @@ use std::sync::{Arc, LazyLock, Mutex as StdMutex, MutexGuard, PoisonError, Weak}
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use copper_cloud_core::error::ApiError;
-use copper_cloud_core::events::Event;
-use copper_cloud_core::state::{AppState, SharedState};
+use canvas_cloud_core::error::ApiError;
+use canvas_cloud_core::events::Event;
+use canvas_cloud_core::state::{AppState, SharedState};
 use serde::Serialize;
 use tokio::sync::{broadcast, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use uuid::Uuid;
@@ -112,7 +112,7 @@ impl DocState {
         }
         let produced: Arc<StdMutex<Vec<Vec<u8>>>> = Arc::default();
         let sink = Arc::clone(&produced);
-        doc.observe_update_v1("copper-cloud-persist", move |_, e| {
+        doc.observe_update_v1("canvas-cloud-persist", move |_, e| {
             lock(&sink).push(e.update.clone());
         })
         .map_err(|e| ApiError::internal(format!("observing canvas doc: {e}")))?;

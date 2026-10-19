@@ -8,8 +8,8 @@ mod common;
 use std::time::Duration;
 
 use axum::http::StatusCode;
+use canvas_cloud_core::events::Event;
 use common::{add_sticky, eventually, set_prop, TestApp};
-use copper_cloud_core::events::Event;
 use futures::SinkExt as _;
 use serde_json::{json, Value};
 
@@ -81,7 +81,7 @@ async fn two_clients_sync_both_ways_and_relay_awareness() {
             .await,
         "A's awareness is removed when A disconnects"
     );
-    assert!(copper_cloud_canvas::rooms_metrics().peers >= 2);
+    assert!(canvas_cloud_engine::rooms_metrics().peers >= 2);
     pb.close().await;
     pc.close().await;
 
@@ -131,10 +131,10 @@ async fn persistence_survives_room_eviction() {
     p.close().await;
 
     assert!(
-        eventually(T, || async { copper_cloud_canvas::evict_room_now(cid) }).await,
+        eventually(T, || async { canvas_cloud_engine::evict_room_now(cid) }).await,
         "room evicts once the peer is gone"
     );
-    assert!(!copper_cloud_canvas::room_in_memory(cid));
+    assert!(!canvas_cloud_engine::room_in_memory(cid));
 
     // Reload from Postgres.
     let doc = app.state_doc(&a, &id).await;
@@ -143,7 +143,7 @@ async fn persistence_survives_room_eviction() {
         common::shape_prop(&doc, "n2", "text"),
         Some(json!("note 2"))
     );
-    assert!(copper_cloud_canvas::room_in_memory(cid));
+    assert!(canvas_cloud_engine::room_in_memory(cid));
 
     // A new peer syncs the persisted content.
     let p2 = app.peer(&a, &id).await;
@@ -212,7 +212,7 @@ async fn compaction_after_200_updates() {
     p.close().await;
 
     // Snapshot + tail reload to the same content.
-    assert!(eventually(T, || async { copper_cloud_canvas::evict_room_now(cid) }).await);
+    assert!(eventually(T, || async { canvas_cloud_engine::evict_room_now(cid) }).await);
     let doc = app.state_doc(&a, &id).await;
     assert_eq!(common::shape_count(&doc), n);
 }
@@ -394,7 +394,7 @@ async fn revoked_and_deleted_canvases_close_sockets() {
     assert_eq!(s, StatusCode::OK);
     assert_eq!(
         pb.wait_closed(T).await,
-        Some(copper_cloud_canvas::close_codes::REVOKED)
+        Some(canvas_cloud_engine::close_codes::REVOKED)
     );
     // The owner's socket stays up.
     pa.edit(|txn| add_sticky(txn, "still", "here", 0.0)).await;
@@ -409,9 +409,9 @@ async fn revoked_and_deleted_canvases_close_sockets() {
     assert_eq!(s, StatusCode::OK);
     assert_eq!(
         pa.wait_closed(T).await,
-        Some(copper_cloud_canvas::close_codes::DELETED)
+        Some(canvas_cloud_engine::close_codes::DELETED)
     );
-    assert!(!copper_cloud_canvas::room_in_memory(canvas_uuid(&id)));
+    assert!(!canvas_cloud_engine::room_in_memory(canvas_uuid(&id)));
 }
 
 #[tokio::test]
@@ -428,7 +428,7 @@ async fn invalid_frames_close_the_peer() {
     .unwrap();
     assert_eq!(
         p.wait_closed(T).await,
-        Some(copper_cloud_canvas::close_codes::INVALID)
+        Some(canvas_cloud_engine::close_codes::INVALID)
     );
     // The room still works for others.
     let mut q = app.peer(&a, &id).await;
@@ -448,7 +448,7 @@ async fn oversized_messages_are_refused() {
     let a = app.user("huge").await;
     let id = app.canvas(&a, "Huge").await;
     let mut p = app.peer(&a, &id).await;
-    let big = vec![0u8; copper_cloud_canvas::MAX_MESSAGE_BYTES + 1];
+    let big = vec![0u8; canvas_cloud_engine::MAX_MESSAGE_BYTES + 1];
     let _ =
         p.ws.send(tokio_tungstenite::tungstenite::Message::Binary(big.into()))
             .await;

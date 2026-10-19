@@ -1,8 +1,8 @@
-//! Instance-admin operations used by the admin API (`/admin/api/*`, in the binary crate).
-//! They bypass membership checks — callers must have authenticated an admin.
+//! Instance-admin operations (the admin CLI, an app's admin APIs). They bypass membership
+//! checks — callers must have authorized the action themselves.
 
-use copper_cloud_core::error::ApiError;
-use copper_cloud_core::state::AppState;
+use canvas_cloud_core::error::ApiError;
+use canvas_cloud_core::state::AppState;
 use uuid::Uuid;
 
 use crate::rest::{member_ids, publish};

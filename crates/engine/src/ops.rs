@@ -1,5 +1,5 @@
 //! Canvas ops (spec §4) with the same semantics as the canvas page's `Canvas/src/ops.ts`
-//! (`copperCanvas.apply`), applied to a `yrs` document inside one transaction:
+//! (its `apply` entry point), applied to a `yrs` document inside one transaction:
 //!
 //! ```text
 //! {op:"add", shape:{type, id?, x?, y?, w?, h?, color?, …}}  // no x/y → free space near `near`
@@ -191,6 +191,9 @@ pub struct OpsCtx {
     pub confirm_clear: bool,
     /// Where auto-placement looks for free space (the viewport centre on the page).
     pub origin: Point,
+    /// Link schemes accepted on top of `http`, `https` and `mailto` (lower-case, without
+    /// the colon), from `ops.extra_url_schemes` in the server config.
+    pub extra_url_schemes: Vec<String>,
 }
 
 impl OpsCtx {
@@ -202,6 +205,7 @@ impl OpsCtx {
             now_ms: crate::schema::now_ms(),
             confirm_clear: false,
             origin: Point { x: 0.0, y: 0.0 },
+            extra_url_schemes: Vec::new(),
         }
     }
 }
@@ -395,8 +399,9 @@ fn has_scheme(s: &str) -> bool {
     false
 }
 
-/// An `http(s)`, `mailto` or `copper` URL, normalised (bare hosts get `https://`).
-pub fn valid_url(v: &Value) -> Result<String, String> {
+/// An `http(s)` or `mailto` URL — or one of `extra_schemes` — normalised (bare hosts get
+/// `https://`).
+pub fn valid_url(v: &Value, extra_schemes: &[String]) -> Result<String, String> {
     let raw = v
         .as_str()
         .filter(|s| !s.trim().is_empty())
@@ -409,7 +414,9 @@ pub fn valid_url(v: &Value) -> Result<String, String> {
     };
     let parsed = url::Url::parse(&candidate)
         .map_err(|_| format!("`url` is not a URL: {}", js_slice(t, 80)))?;
-    if !matches!(parsed.scheme(), "http" | "https" | "mailto" | "copper") {
+    let scheme = parsed.scheme();
+    if !matches!(scheme, "http" | "https" | "mailto") && !extra_schemes.iter().any(|s| s == scheme)
+    {
         return Err(format!("unsupported link scheme {}:", parsed.scheme()));
     }
     Ok(parsed.to_string())
@@ -453,6 +460,7 @@ fn clean_props(
     txn: &TransactionMut,
     shapes: &MapRef,
     self_id: Option<&str>,
+    ctx: &OpsCtx,
 ) -> Result<JsonMap<String, Value>, String> {
     let allowed = kind.allowed();
     let mut out = JsonMap::new();
@@ -525,7 +533,7 @@ fn clean_props(
             },
             "image" => clean_image(value)?,
             "src" => Value::String(valid_image_src(value)?),
-            "url" => Value::String(valid_url(value)?),
+            "url" => Value::String(valid_url(value, &ctx.extra_url_schemes)?),
             "favicon" => {
                 let f = value
                     .as_str()
@@ -916,7 +924,7 @@ fn op_add(
         }
         Some(_) => return Err("`shape.id` must be 1–64 of A–Z a–z 0–9 _ - : .".into()),
     };
-    let mut props = clean_props(kind, raw, txn, shapes, id.as_deref())?;
+    let mut props = clean_props(kind, raw, txn, shapes, id.as_deref(), ctx)?;
     let id = id.unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
     props.insert("by".into(), ctx.by.clone().into());
 
@@ -988,7 +996,7 @@ fn op_update(
     ctx: &OpsCtx,
 ) -> Result<String, String> {
     let shape = need_shape(txn, shapes, id)?;
-    let mut props = clean_props(shape.kind, patch, txn, shapes, Some(&shape.id))?;
+    let mut props = clean_props(shape.kind, patch, txn, shapes, Some(&shape.id), ctx)?;
     clamp_min(shape.kind, &mut props);
     if shape.is_arrow() {
         let pick = |k: &str, cur: &Option<Endpoint>| {
@@ -1187,7 +1195,7 @@ fn op_connect(
         }
         Some(_) => return Err("`id` must be 1–64 of A–Z a–z 0–9 _ - : .".into()),
     };
-    let mut props = clean_props(ShapeType::Arrow, &raw, txn, shapes, id.as_deref())?;
+    let mut props = clean_props(ShapeType::Arrow, &raw, txn, shapes, id.as_deref(), ctx)?;
     props.insert("by".into(), ctx.by.clone().into());
     let id = id.unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
     create(txn, shapes, ShapeType::Arrow, &id, &props, ctx);

@@ -1,23 +1,26 @@
-//! Shared integration-test harness: real Postgres (`COPPER_CLOUD_TEST_CANVAS_DATABASE_URL`,
-//! default `postgres://localhost:5432/copper_cloud_test_canvas`), the real core app + canvas
-//! router on an ephemeral port, users/sessions inserted directly, and a minimal y-websocket
-//! client built on `yrs` + tokio-tungstenite.
+//! Shared integration-test harness: real native Postgres
+//! (`CANVAS_CLOUD_TEST_ENGINE_DATABASE_URL`, default
+//! `postgres://farce@localhost:5433/cvc_engine_test`), the real core app + engine routers on
+//! an ephemeral port, users/sessions/tokens/apps inserted through core's identity helpers,
+//! and a minimal y-websocket client built on `yrs` + tokio-tungstenite.
 
 #![allow(dead_code, clippy::missing_panics_doc)]
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use base64::Engine as _;
-use copper_cloud_core::config::Config;
-use copper_cloud_core::crypto::Crypto;
-use copper_cloud_core::ids;
-use copper_cloud_core::state::{AppState, SharedState};
+use canvas_cloud_core::config::Config;
+use canvas_cloud_core::identity::{
+    create_access_token, create_app, create_session, insert_user, NewUser, Scope,
+};
+use canvas_cloud_core::ids;
+use canvas_cloud_core::state::{AppState, SharedState};
+use canvas_cloud_core::Mounts;
 use futures::{SinkExt as _, StreamExt as _};
 use http_body_util::BodyExt as _;
 use serde_json::Value;
@@ -39,12 +42,12 @@ use yrs::{
     ClientID, Doc, Map as _, Out, ReadTxn as _, StateVector, Transact as _, TransactionMut, Update,
 };
 
-pub const DATABASE_URL: &str = "postgres://localhost:5432/copper_cloud_test_canvas";
+pub const DATABASE_URL: &str = "postgres://farce@localhost:5433/cvc_engine_test";
 
-/// The test database: `COPPER_CLOUD_TEST_CANVAS_DATABASE_URL`, else [`DATABASE_URL`] — so
+/// The test database: `CANVAS_CLOUD_TEST_ENGINE_DATABASE_URL`, else [`DATABASE_URL`] — so
 /// parallel checkouts can each test against their own database.
 pub fn database_url() -> String {
-    std::env::var("COPPER_CLOUD_TEST_CANVAS_DATABASE_URL")
+    std::env::var("CANVAS_CLOUD_TEST_ENGINE_DATABASE_URL")
         .unwrap_or_else(|_| DATABASE_URL.to_owned())
 }
 
@@ -53,9 +56,7 @@ static MIGRATED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
 async fn migrate(pool: &PgPool) {
     MIGRATED
         .get_or_init(|| async {
-            let migrator = sqlx::migrate::Migrator::new(Path::new("../copper-cloud/migrations"))
-                .await
-                .expect("reading migrations");
+            let migrator = &canvas_cloud_core::db::MIGRATOR;
             if let Err(e) = migrator.run(pool).await {
                 // A migration changed during development: start from a clean schema.
                 eprintln!("migrations failed ({e}); resetting the test schema");
@@ -74,10 +75,9 @@ pub struct TestApp {
     pub state: SharedState,
     pub router: axum::Router,
     pub addr: SocketAddr,
-    pub instance_key: String,
 }
 
-/// A signed-in user.
+/// A signed-in user (`token` is a `cvs_…` session token).
 #[derive(Clone, Debug)]
 pub struct User {
     pub id: Uuid,
@@ -85,9 +85,26 @@ pub struct User {
     pub token: String,
 }
 
+impl User {
+    /// The same user calling with another credential (a PAT, or an app key acting for them).
+    pub fn with_token(&self, token: impl Into<String>) -> Self {
+        Self {
+            token: token.into(),
+            ..self.clone()
+        }
+    }
+}
+
 impl TestApp {
     pub async fn new() -> Self {
         Self::with_config(Config::for_tests(&database_url())).await
+    }
+
+    /// A server whose test config `f` adjusted first.
+    pub async fn with(f: impl FnOnce(&mut Config)) -> Self {
+        let mut cfg = Config::for_tests(&database_url());
+        f(&mut cfg);
+        Self::with_config(cfg).await
     }
 
     /// A second server over the same database and config (same master key): what a restart
@@ -102,14 +119,18 @@ impl TestApp {
             .acquire_timeout(Duration::from_secs(30))
             .connect(&cfg.database_url)
             .await
-            .expect("connecting to the canvas test database (createdb copper_cloud_test_canvas)");
+            .expect(
+                "connecting to the engine test database \
+                 (createdb -w -h localhost -p 5433 cvc_engine_test)",
+            );
         migrate(&pool).await;
-        let instance_key = cfg.instance_key.clone();
         let state = AppState::new(pool, cfg);
-        let router = copper_cloud_core::app_with(
+        let router = canvas_cloud_core::app_with(
             state.clone(),
-            copper_cloud_canvas::router(),
-            copper_cloud_canvas::landing_router(),
+            Mounts::new()
+                .v1(canvas_cloud_engine::router())
+                .root(canvas_cloud_engine::landing_router())
+                .features(canvas_cloud_engine::FEATURES),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -123,7 +144,6 @@ impl TestApp {
             state,
             router,
             addr,
-            instance_key,
         }
     }
 
@@ -131,45 +151,51 @@ impl TestApp {
         &self.state.db
     }
 
-    /// Inserts a user + device + session directly (core schema) and returns its bearer token.
+    /// Inserts a user + session through core's identity helpers; returns its session token.
     pub async fn user(&self, name: &str) -> User {
-        let id = ids::uuid_v7();
-        let email = format!("{name}-{}@example.test", &id.simple().to_string()[20..]);
-        let wrapped = self.state.crypto.wrap_key(&Crypto::new_key());
-        sqlx::query(
-            "INSERT INTO users (id, email, display_name, password_hash, data_key_wrapped)
-             VALUES ($1, $2, $3, 'not-a-real-hash', $4)",
+        let tag = ids::uuid_v7().simple().to_string();
+        let email = format!("{name}-{}@example.test", &tag[20..]);
+        let id = insert_user(
+            self.db(),
+            &NewUser {
+                email: &email,
+                display_name: Some(name),
+                ..NewUser::default()
+            },
         )
-        .bind(id)
-        .bind(&email)
-        .bind(name)
-        .bind(&wrapped)
-        .execute(self.db())
         .await
         .unwrap();
-        let device = ids::uuid_v7();
-        sqlx::query("INSERT INTO devices (user_id, id, name) VALUES ($1, $2, 'test')")
-            .bind(id)
-            .bind(device)
-            .execute(self.db())
+        let token = create_session(self.db(), id, Some("engine-tests"))
             .await
             .unwrap();
-        let token = ids::random_token();
-        sqlx::query(
-            "INSERT INTO sessions (id, user_id, device_id, token_sha256, expires_at)
-             VALUES ($1, $2, $3, $4, now() + interval '1 day')",
-        )
-        .bind(ids::uuid_v7())
-        .bind(id)
-        .bind(device)
-        .bind(&ids::sha256(token.as_bytes())[..])
-        .execute(self.db())
-        .await
-        .unwrap();
         User { id, email, token }
     }
 
-    /// One REST call through the full app (instance gate included).
+    /// A personal access token (`cvt_…`) of `user` with `scope`.
+    pub async fn pat(&self, user: &User, scope: Scope) -> String {
+        create_access_token(self.db(), user.id, "engine tests", scope, None)
+            .await
+            .unwrap()
+            .1
+    }
+
+    /// A linked app with `user` provisioned as subject `subject`; returns the app key
+    /// (`cva_…`). Call with it plus `X-Canvas-User: <subject>`.
+    pub async fn app_key_for(&self, user: &User, subject: &str) -> String {
+        let (app_id, key) = create_app(self.db(), "engine tests", false, true)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO app_users (app_id, subject, user_id) VALUES ($1, $2, $3)")
+            .bind(app_id)
+            .bind(subject)
+            .bind(user.id)
+            .execute(self.db())
+            .await
+            .unwrap();
+        key
+    }
+
+    /// One REST call through the full app.
     pub async fn call(
         &self,
         user: Option<&User>,
@@ -177,12 +203,24 @@ impl TestApp {
         path: &str,
         body: Option<Value>,
     ) -> (StatusCode, Value) {
-        let mut req = Request::builder()
-            .method(method)
-            .uri(format!("/v1{path}"))
-            .header("x-copper-instance", &self.instance_key);
+        self.call_with(user, method, path, body, &[]).await
+    }
+
+    /// [`Self::call`] with extra request headers.
+    pub async fn call_with(
+        &self,
+        user: Option<&User>,
+        method: Method,
+        path: &str,
+        body: Option<Value>,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, Value) {
+        let mut req = Request::builder().method(method).uri(format!("/v1{path}"));
         if let Some(u) = user {
             req = req.header("authorization", format!("Bearer {}", u.token));
+        }
+        for (name, value) in headers {
+            req = req.header(*name, *value);
         }
         let req = match body {
             Some(b) => req
@@ -270,9 +308,7 @@ impl TestApp {
         token: &str,
     ) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>, tokio_tungstenite::tungstenite::Error>
     {
-        let mut req = self.ws_url(canvas, token).into_client_request().unwrap();
-        req.headers_mut()
-            .insert("x-copper-instance", self.instance_key.parse().unwrap());
+        let req = self.ws_url(canvas, token).into_client_request().unwrap();
         tokio_tungstenite::connect_async(req)
             .await
             .map(|(ws, _)| ws)
@@ -444,7 +480,7 @@ pub fn shape_prop(doc: &Doc, id: &str, key: &str) -> Option<Value> {
         return None;
     };
     m.get(&txn, key)
-        .map(|o| copper_cloud_canvas::schema::out_to_json(&txn, &o))
+        .map(|o| canvas_cloud_engine::schema::out_to_json(&txn, &o))
 }
 
 pub fn shape_count(doc: &Doc) -> u32 {
