@@ -36,6 +36,39 @@ On `SIGTERM` or `SIGINT` the server stops accepting connections, ends event stre
 every canvas WebSocket with `1001` (clients reconnect), and gives in-flight requests 10 s.
 No edit is lost: every update is written to PostgreSQL before it is broadcast.
 
+## Command line
+
+Every command takes `--config PATH` (default `CANVAS_CLOUD_CONFIG`, else
+`/etc/canvas-cloud/canvas-cloud.toml`) and reads the same config as the server, so on an
+installed server run it with `sudo`. `admin` and `apps` talk to the database directly; the
+server does not need to be running. Every change they make is recorded in `admin_audit`
+with actor `cli`.
+
+| Command | What |
+|---|---|
+| `serve [--no-migrate]` | run the server (the default command) |
+| `migrate` | apply pending migrations and exit |
+| `doctor` | check the installation; non-zero exit on failure ([below](#canvas-cloud-doctor)) |
+| `healthcheck [--wait N]` | probe `/healthz` on the listen address, retrying for `N` seconds; prints `healthy` |
+| `tls-init [--force] [--name N]…` | create the self-signed certificate if missing (`--force` replaces it; `--name` adds names); prints its fingerprint |
+| `gen-config …` | write a new config with a fresh master key ([install.md](install.md#from-source)) |
+| `version` | print the version |
+| `admin users list` | users with status, sign-in kind and canvas count |
+| `admin users create --email E [--display-name N] --password-file F` | create a password user, also while signup is closed |
+| `admin users disable --email E` / `enable --email E` | block or allow sign-in; disable revokes sessions and access tokens |
+| `admin users set-password --email E --password-file F` | set a password and revoke every session |
+| `admin users delete --email E [--yes]` | delete the user, the canvases they own and their memberships (asks unless `--yes`; without a terminal it needs `--yes`) |
+| `admin settings get` | show `allow_signup` and `signup_domains` |
+| `admin settings set allow_signup true\|false` / `set signup_domains a.com,b.com` | the signup policy ([auth.md](auth.md#signup-policy)) |
+| `apps create --name N [--allow-import] [--no-trust-email]` | register a linked app; prints its `cva_…` key once |
+| `apps list` | linked apps (never their keys) |
+| `apps set ID [--allow-import true\|false] [--trust-email true\|false]` | change an app's policy |
+| `apps rotate ID` | new key, printed once; the old key stops working |
+| `apps revoke ID` | disable the app's key (its users and canvases stay) |
+
+`--password-file` reads the first line of a file, or of stdin with `-`; passwords are never
+command-line arguments.
+
 ## Logs
 
 One line per event on stdout (journald under systemd): JSON by default (`log_format`),
