@@ -41,7 +41,7 @@ data: {"reason":"gap"}
 
 | Event | `id` | `data` | Meaning |
 |---|---|---|---|
-| `canvas` | yes | `{"type":"canvas","canvas_id","kind"}` — the same JSON as copper-cloud's `canvas` frames | something about that canvas changed; refetch it (or the list) |
+| `canvas` | yes | `{"type":"canvas","canvas_id","kind"}` | something about that canvas changed; refetch it (or the list) |
 | `ready` | yes | `{"user_id","last_event_id"}` | sent **once** per connection, after any replay: everything up to this id has been delivered |
 | `resync` | no | `{"reason":"gap"}` or `{"reason":"lagged","skipped":n}` | some events were lost; refetch everything you cache, then carry on (the stream stays open) |
 | (comment) | — | `: keepalive` | every 15 s, to keep proxies from closing an idle stream |

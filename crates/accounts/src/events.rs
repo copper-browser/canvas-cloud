@@ -10,8 +10,8 @@
 //!
 //! Frames:
 //!
-//! * `event: canvas` / `id: <u64>` / `data: {"type":"canvas","canvas_id":…,"kind":…}` — the
-//!   same JSON as copper-cloud's `canvas` frames;
+//! * `event: canvas` / `id: <u64>` / `data: {"type":"canvas","canvas_id":…,"kind":…}` (the
+//!   kinds are listed in `docs/canvas.md`);
 //! * `event: resync` / `data: {"reason":"gap"}` (the `Last-Event-ID` is no longer buffered,
 //!   or unknown) or `{"reason":"lagged","skipped":n}` (this stream fell behind): refetch
 //!   whatever you cache, then carry on;

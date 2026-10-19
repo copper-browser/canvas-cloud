@@ -30,8 +30,8 @@ answers the same `401 invalid_credentials` as for a wrong password. Signup never
 existing row, password-less or not (`409 email_taken`): otherwise whoever typed the email
 first would get that person's canvases.
 
-Emails are trimmed, validated (`x@y.z`, ≤ 254 bytes, no whitespace) and lower-cased, as in
-copper-cloud's invites; lookups are case-insensitive.
+Emails are trimmed, validated (`x@y.z`, ≤ 254 bytes, no whitespace) and lower-cased, like
+canvas invites; lookups are case-insensitive.
 
 ## Credentials
 

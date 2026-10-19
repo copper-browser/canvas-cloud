@@ -627,7 +627,7 @@ async fn events_stream_live_with_ids_and_only_the_callers() {
     assert_eq!(ready.json()["user_id"], json!(hal.id));
 
     // Ivy's events never reach Hal; Hal's REST actions do, with increasing ids and the
-    // copper-cloud `canvas` frame JSON.
+    // `canvas` frame JSON.
     app.state.events.publish(ivy.id, canvas_event("update"));
     let (s, canvas) = app
         .post("/v1/canvases", Some(&hal.token), json!({ "name": "Board" }))
