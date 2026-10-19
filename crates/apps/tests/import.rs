@@ -1188,3 +1188,95 @@ async fn the_documented_example_imports() {
     assert_eq!(v["members"], 2);
     assert_eq!(v["digest"], documented);
 }
+
+/// lib0 v1 var-uint.
+fn var_uint(out: &mut Vec<u8>, mut v: u64) {
+    loop {
+        let b = (v & 0x7f) as u8;
+        v >>= 7;
+        if v == 0 {
+            out.push(b);
+            break;
+        }
+        out.push(b | 0x80);
+    }
+}
+
+/// Histories whose deletes start or end inside a UTF-16 surrogate pair (as a Yjs peer sends
+/// them), which yrs 0.28 cannot always encode consistently: each import either stores a
+/// snapshot that reads back as exactly the imported document, or is refused with
+/// `422 unverifiable_snapshot` and stores nothing — never a wrong snapshot.
+#[tokio::test]
+async fn surrogate_pair_splits_import_exactly_or_not_at_all() {
+    let (t, app, ann, _) = setup(true).await;
+    let cases: [(&str, &[(u64, u64)]); 4] = [
+        ("a🔴b c🟡d", &[(2, 4), (7, 1)]),
+        ("🔴 The end it.", &[(1, 1)]),
+        ("🔴 The end it.", &[(1, 1), (3, 1)]),
+        ("a🔴b", &[(1, 2)]),
+    ];
+    let (mut stored, mut refused) = (0, 0);
+    for (text, ranges) in cases {
+        let peer = Doc::with_client_id(44);
+        {
+            let mut txn = peer.transact_mut();
+            let shapes = txn.get_or_insert_map("shapes");
+            shapes.insert(&mut txn, "s", yrs::TextPrelim::new(text));
+        }
+        let first = peer
+            .transact()
+            .encode_state_as_update_v1(&yrs::StateVector::default());
+        // No structs; a delete set for client 44 (its text starts at clock 1).
+        let mut deletes = Vec::new();
+        var_uint(&mut deletes, 0);
+        var_uint(&mut deletes, 1);
+        var_uint(&mut deletes, 44);
+        var_uint(&mut deletes, ranges.len() as u64);
+        for (at, len) in ranges {
+            var_uint(&mut deletes, at + 1);
+            var_uint(&mut deletes, *len);
+        }
+        let expected = canvas_cloud_engine::compact::server_doc();
+        for u in [&first, &deletes] {
+            expected
+                .transact_mut()
+                .apply_update(Update::decode_v1(u).unwrap())
+                .unwrap();
+        }
+        let want = document_digest(&expected);
+
+        let id = Uuid::new_v4();
+        let body = ndjson(&[
+            canvas_line(id, "shared", &ann),
+            member(&ann, "owner"),
+            update(&first),
+            update(&deletes),
+            end(2, 1, 0, 0, 0),
+        ]);
+        let (s, v) = t.import(&app, None, body).await;
+        let what = format!("{text:?} {ranges:?}");
+        if s == StatusCode::OK || text == "a🔴b" {
+            // A pair deleted whole is the everyday case and always stores.
+            assert_eq!(s, StatusCode::OK, "{what}: {v}");
+            stored += 1;
+            assert_eq!(v["digest"], want, "{what}: {v}");
+            let (s, d) = t
+                .get(&app.me(), &format!("/apps/self/canvases/{id}/digest"))
+                .await;
+            assert_eq!(s, StatusCode::OK, "{what}: {d}");
+            assert_eq!(
+                d["digest"], want,
+                "{what}: the stored snapshot reads back the same"
+            );
+        } else {
+            refused += 1;
+            assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY, "{what}: {v}");
+            assert_eq!(err(&v), "unverifiable_snapshot", "{what}: {v}");
+            assert!(!canvas_exists(&t, id).await, "{what}: nothing stored");
+        }
+    }
+    assert!(
+        stored >= 1 && refused >= 1,
+        "{stored} stored, {refused} refused"
+    );
+}

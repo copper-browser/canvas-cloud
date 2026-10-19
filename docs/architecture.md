@@ -135,7 +135,13 @@ Details: [events.md](events.md) and [apps.md](apps.md#events--get-v1appsselfeven
   disconnected; clients reconnect and their sync handshake re-sends what the server lacks.
 - **Snapshots and compaction**: after 200 persisted updates the room encodes its whole state
   (`encode_state_as_update_v1`), seals it into `canvas_snapshots`, and deletes the folded
-  updates, in one transaction.
+  updates, in one transaction. A snapshot is written only when it provably re-applies to the
+  same document (`crates/engine/src/compact.rs`): rooms never garbage-collect in memory; the
+  garbage-collected encoding is tried on a copy and kept if a fresh document built from it has
+  the same state vector and digest, else the uncollected encoding under the same check, else
+  no snapshot (the update log stays the record). This guards against a yrs 0.28 bug: a text
+  split inside a UTF-16 surrogate pair (a Yjs peer editing between the two halves of an
+  emoji) can encode wrongly, which on real data dropped 55 of 72 shapes from a snapshot.
 - **Loading** a room reads the snapshot plus updates with a higher `seq`.
 - **Eviction**: a room with no peers and no REST use for 60 s leaves memory.
 - **Encryption**: each canvas has a random 32-byte key; the master key derives (HKDF-SHA256)

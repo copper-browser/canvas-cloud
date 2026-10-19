@@ -348,7 +348,9 @@ awareness table, and one `tokio::sync::broadcast` channel (256 frames) fanned ou
   disconnected (`1011`); y-websocket clients reconnect and their sync handshake re-sends
   whatever the server is missing, so no edit is lost.
 - **Compaction**: every 200 persisted updates, `encode_state_as_update_v1` of the room doc is
-  sealed into `canvas_snapshots` and the folded updates are deleted — one transaction.
+  sealed into `canvas_snapshots` and the folded updates are deleted — one transaction. Only
+  a snapshot verified to re-apply to the same document is written (garbage-collected if that
+  verifies, else uncollected, else none); see [architecture](architecture.md).
 - **Eviction**: a room with no peers and no REST use for 60 s is dropped from memory (it is
   only removed when nothing else holds it, so an in-flight write can never be orphaned).
 - **Awareness** (cursors/presence) is relayed between peers and kept in memory only, never

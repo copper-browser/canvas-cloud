@@ -8,6 +8,7 @@ use canvas_cloud_core::error::ApiError;
 use canvas_cloud_core::extract::QueryParams;
 use canvas_cloud_core::identity::{self, AppAuth};
 use canvas_cloud_core::state::SharedState;
+use canvas_cloud_engine::compact::server_doc;
 use canvas_cloud_engine::{admin, store};
 use futures::TryStreamExt as _;
 use serde_json::{json, Value};
@@ -224,7 +225,7 @@ pub async fn load_doc(state: &SharedState, canvas_id: Uuid) -> Result<Option<Doc
             .fetch_optional(&mut *tx)
             .await?;
     let since = snapshot.as_ref().map_or(0, |s| s.0);
-    let doc = Doc::new();
+    let doc = server_doc();
     if let Some((_, sealed)) = &snapshot {
         apply_sealed(&doc, &key, canvas_id, sealed)?;
     }

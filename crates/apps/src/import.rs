@@ -6,7 +6,8 @@
 //! are applied to an in-memory `yrs::Doc` — so apart from that document, memory stays bounded
 //! by one line (`limits.import_max_line_bytes`), whatever the body size
 //! (`limits.import_max_bytes`). After the `end` line the document is stored as **one**
-//! compacted snapshot sealed under a fresh doc key, and the transaction commits.
+//! compacted snapshot sealed under a fresh doc key (one that provably re-applies to the same
+//! document, `canvas_cloud_engine::compact`), and the transaction commits.
 
 use std::collections::{HashMap, HashSet};
 
@@ -22,6 +23,7 @@ use canvas_cloud_core::extract::QueryParams;
 use canvas_cloud_core::identity::{self, AppAuth};
 use canvas_cloud_core::ids;
 use canvas_cloud_core::state::SharedState;
+use canvas_cloud_engine::compact::{compact_state, server_doc};
 use canvas_cloud_engine::mentions::{EXCERPT_AAD_PREFIX, MAX_EXCERPT_CHARS, MAX_MESSAGE_ID_CHARS};
 use canvas_cloud_engine::{admin, store};
 use futures::{Stream, StreamExt as _};
@@ -737,7 +739,7 @@ where
         head,
         key: &key,
         subjects,
-        doc: Doc::new(),
+        doc: server_doc(),
         upper: StateVector::default(),
         counts: Counts::default(),
         members: HashSet::new(),
@@ -867,6 +869,8 @@ fn check_counts(end_line: u64, expected: [u64; 5], counts: &Counts) -> Result<()
 /// structs are still pending, or when some client's updates have a gap: yrs 0.28 integrates
 /// an update that starts past a client's known clock without marking anything pending (its
 /// state vector then stops short of what the updates carried), so both are checked.
+/// `422 unverifiable_snapshot` when no snapshot encoding re-applies to the same document
+/// (see `canvas_cloud_engine::compact`): nothing is stored rather than a wrong snapshot.
 fn compacted(doc: &Doc, upper: &StateVector, end_line: u64) -> Result<(Vec<u8>, String)> {
     let txn = doc.transact();
     let have = txn.state_vector();
@@ -880,10 +884,17 @@ fn compacted(doc: &Doc, upper: &StateVector, end_line: u64) -> Result<(Vec<u8>, 
             "the updates leave parts of the document pending (missing updates)",
         ));
     }
-    Ok((
-        txn.encode_state_as_update_v1(&StateVector::default()),
-        digest_txn(&txn),
-    ))
+    let digest = digest_txn(&txn);
+    let Some(snapshot) = compact_state(&txn) else {
+        return Err(unprocessable(
+            "unverifiable_snapshot",
+            end_line,
+            "no snapshot of this document re-applies to the same document (a text was split \
+             inside a UTF-16 surrogate pair, which yrs cannot encode consistently); nothing was \
+             imported",
+        ));
+    };
+    Ok((snapshot.state, digest))
 }
 
 /// The rows of one import, inserted inside its transaction as their lines arrive.

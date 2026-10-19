@@ -14,7 +14,8 @@ First release. Release notes: [docs/v0.1.0.md](docs/v0.1.0.md).
 - Canvases: Personal and shared canvases, owner/editor roles, email invites, share links,
   people directory, chat @mentions; REST API under `/v1`.
 - Live rooms over the standard `y-websocket` protocol, durable before broadcast, with
-  snapshot compaction.
+  verified snapshot compaction (a snapshot is stored only if it re-applies to the same
+  document, which works around a yrs 0.28 surrogate-pair encoding bug).
 - Agent read format and validated ops on the live document.
 - Encryption at rest: per-canvas keys wrapped by the master key (AES-256-GCM).
 - Password accounts with a signup policy, OIDC sign-in, personal access tokens (`read` /
