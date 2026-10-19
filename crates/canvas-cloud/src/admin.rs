@@ -46,6 +46,39 @@ pub async fn apps(cfg: &Config, cmd: AppsCommand) -> anyhow::Result<()> {
     result
 }
 
+/// `canvas-cloud apps set <id> [--allow-import true|false] [--trust-email true|false]`.
+async fn set_app(
+    pool: &PgPool,
+    id: Uuid,
+    allow_import: Option<bool>,
+    trust_email: Option<bool>,
+) -> anyhow::Result<()> {
+    if allow_import.is_none() && trust_email.is_none() {
+        bail!("nothing to set (use --allow-import true|false and/or --trust-email true|false)");
+    }
+    let row: Option<(bool, bool)> = sqlx::query_as(
+        "UPDATE apps SET allow_import = coalesce($2, allow_import),
+                         trust_email = coalesce($3, trust_email)
+         WHERE id = $1 RETURNING allow_import, trust_email",
+    )
+    .bind(id)
+    .bind(allow_import)
+    .bind(trust_email)
+    .fetch_optional(pool)
+    .await?;
+    let (allow_import, trust_email) = row.ok_or_else(|| anyhow!("no app {id}"))?;
+    identity::audit(
+        pool,
+        ACTOR,
+        "app.set",
+        &id.to_string(),
+        json!({ "allow_import": allow_import, "trust_email": trust_email }),
+    )
+    .await;
+    println!("app {id}: allow_import={allow_import} trust_email={trust_email}");
+    Ok(())
+}
+
 async fn find_user(pool: &PgPool, email: &str) -> anyhow::Result<Uuid> {
     identity::user_id_by_email(pool, email.trim())
         .await?
@@ -280,13 +313,22 @@ async fn apps_cmd(pool: &PgPool, cmd: AppsCommand) -> anyhow::Result<()> {
         }
         AppsCommand::List => {
             let rows = identity::list_apps(pool).await.map_err(api_err)?;
+            // Canvases owned by each app's users.
+            let canvases: std::collections::HashMap<Uuid, i64> = sqlx::query_as(
+                "SELECT au.app_id, count(c.id) FROM app_users au
+                 JOIN canvases c ON c.owner_id = au.user_id GROUP BY au.app_id",
+            )
+            .fetch_all(pool)
+            .await?
+            .into_iter()
+            .collect();
             println!(
-                "{:<36}  {:<24}  {:<7}  {:<6}  {:<6}  {:>6}  last used",
-                "id", "name", "status", "import", "email", "users"
+                "{:<36}  {:<24}  {:<7}  {:<6}  {:<6}  {:>6}  {:>8}  last used",
+                "id", "name", "status", "import", "email", "users", "canvases"
             );
             for a in &rows {
                 println!(
-                    "{}  {:<24}  {:<7}  {:<6}  {:<6}  {:>6}  {}",
+                    "{}  {:<24}  {:<7}  {:<6}  {:<6}  {:>6}  {:>8}  {}",
                     a.id,
                     a.name,
                     if a.revoked_at.is_some() {
@@ -297,6 +339,7 @@ async fn apps_cmd(pool: &PgPool, cmd: AppsCommand) -> anyhow::Result<()> {
                     if a.allow_import { "yes" } else { "no" },
                     if a.trust_email { "trust" } else { "strict" },
                     a.users,
+                    canvases.get(&a.id).copied().unwrap_or(0),
                     a.last_used_at.map_or_else(|| "never".into(), ts),
                 );
             }
@@ -309,6 +352,11 @@ async fn apps_cmd(pool: &PgPool, cmd: AppsCommand) -> anyhow::Result<()> {
             identity::audit(pool, ACTOR, "app.revoke", &id.to_string(), json!({})).await;
             println!("revoked app {id}");
         }
+        AppsCommand::Set {
+            id,
+            allow_import,
+            trust_email,
+        } => set_app(pool, id, allow_import, trust_email).await?,
         AppsCommand::Rotate { id } => {
             let key = identity::rotate_app_key(pool, id)
                 .await

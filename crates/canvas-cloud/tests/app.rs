@@ -302,6 +302,17 @@ fn admin_cli_manages_users_settings_and_apps() {
     .unwrap();
     cli(&config, &["apps", "list"]).unwrap();
     assert!(cli(&config, &["apps", "revoke", &Uuid::now_v7().to_string()]).is_err());
+    assert!(cli(
+        &config,
+        &[
+            "apps",
+            "set",
+            &Uuid::now_v7().to_string(),
+            "--allow-import",
+            "false"
+        ]
+    )
+    .is_err());
 
     // Check the effects in the database.
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -337,6 +348,33 @@ fn admin_cli_manages_users_settings_and_apps() {
         identity::set_setting(&pool, "signup_domains", &json!([]))
             .await
             .unwrap();
+    });
+    // `apps set` flips an app's policy.
+    let app_id: Uuid = rt.block_on(async {
+        let pool = sqlx::PgPool::connect(&database_url()).await.unwrap();
+        sqlx::query_scalar(
+            "SELECT id FROM apps WHERE name = 'Cli app' ORDER BY created_at DESC LIMIT 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    });
+    let id = app_id.to_string();
+    cli(&config, &["apps", "set", &id, "--allow-import", "false"]).unwrap();
+    cli(&config, &["apps", "set", &id, "--trust-email", "false"]).unwrap();
+    assert!(
+        cli(&config, &["apps", "set", &id]).is_err(),
+        "nothing to set"
+    );
+    rt.block_on(async {
+        let pool = sqlx::PgPool::connect(&database_url()).await.unwrap();
+        let flags: (bool, bool) =
+            sqlx::query_as("SELECT allow_import, trust_email FROM apps WHERE id = $1")
+                .bind(app_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(flags, (false, false));
     });
     cli(
         &config,

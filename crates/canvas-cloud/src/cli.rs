@@ -207,6 +207,16 @@ pub enum AppsCommand {
     Revoke { id: Uuid },
     /// Replace an app's key and print the new one once (the old key stops working).
     Rotate { id: Uuid },
+    /// Change an app's policy: `--allow-import true|false`, `--trust-email true|false`.
+    Set {
+        id: Uuid,
+        /// May create canvases with POST /v1/apps/self/import.
+        #[arg(long, value_name = "true|false")]
+        allow_import: Option<bool>,
+        /// Link existing users by email when provisioning (false: 409 email_taken).
+        #[arg(long, value_name = "true|false")]
+        trust_email: Option<bool>,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -454,6 +464,29 @@ mod tests {
         ));
         assert!(parse(&["apps", "revoke", "not-a-uuid"]).is_err());
         assert!(parse(&["apps", "rotate", "00000000-0000-0000-0000-000000000001"]).is_ok());
+        let cli = parse(&[
+            "apps",
+            "set",
+            "00000000-0000-0000-0000-000000000001",
+            "--allow-import",
+            "false",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Apps(AppsCommand::Set {
+                allow_import: Some(false),
+                trust_email: None,
+                ..
+            }))
+        ));
+        assert!(parse(&[
+            "apps",
+            "set",
+            "00000000-0000-0000-0000-000000000001",
+            "--allow-import"
+        ])
+        .is_err());
         assert!(parse(&["healthcheck", "--wait", "30"]).is_ok());
         assert!(parse(&["gen-config", "--write", "-", "--tls-mode", "off"]).is_ok());
         assert!(parse(&["gen-config", "--tls-mode", "plain"]).is_err());
