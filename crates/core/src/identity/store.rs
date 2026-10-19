@@ -285,7 +285,11 @@ pub struct SignupPolicy {
 }
 
 impl SignupPolicy {
-    pub async fn load(db: &sqlx::PgPool) -> ApiResult<Self> {
+    /// Load the policy (any executor, so a signup can re-check it inside its transaction).
+    pub async fn load<'e, E>(db: E) -> ApiResult<Self>
+    where
+        E: sqlx::PgExecutor<'e>,
+    {
         let (has_password_users, allow, domains): (bool, Option<Value>, Option<Value>) =
             sqlx::query_as(
                 "SELECT EXISTS (SELECT 1 FROM users WHERE password_hash IS NOT NULL),
