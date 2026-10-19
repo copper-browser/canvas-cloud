@@ -48,7 +48,8 @@ pub const FEATURES: &[&str] = &["accounts", "access_tokens", "events", "oidc"];
 pub(crate) struct Shared {
     pub(crate) limits: limits::EmailLimiter,
     pub(crate) oidc: oidc::Cache,
-    /// Offset of every `/v1/events` id (see [`events`]).
+    /// Offset of every `/v1/events` id (see [`events`]). 0: core's ids already increase across
+    /// restarts, so the wire ids equal core's (and `/v1/apps/self/events` ids).
     pub(crate) events_base: u64,
 }
 
@@ -57,7 +58,7 @@ impl Shared {
         Self {
             limits: limits::EmailLimiter::default(),
             oidc: oidc::Cache::default(),
-            events_base: events::id_base_now(),
+            events_base: 0,
         }
     }
 }

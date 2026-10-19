@@ -721,17 +721,11 @@ async fn events_resume_from_last_event_id_or_resync() {
     let f = sse.next(WAIT).await.unwrap();
     assert_eq!((f.event.as_str(), f.id), ("ready", Some(d.clone())));
 
-    // An id this process never issued, one from before a restart (another epoch, even with a
-    // core id that exists now), garbage, or one that fell out of the ring buffer → resync,
-    // then ready.
-    let base = r.parse::<u64>().unwrap() - at;
-    let restarted = (base - 1).to_string();
-    for bad in [
-        wire(999_999_999),
-        restarted,
-        a.to_string(),
-        "nope".to_owned(),
-    ] {
+    // An id this process never issued, one from before a restart (ids are numbered from the
+    // process start time in µs, so an earlier process's ids are lower), garbage, or one that
+    // fell out of the ring buffer → resync, then ready.
+    let restarted = wire(at - 1_000_000);
+    for bad in [wire(at + 999_999_999), restarted, "nope".to_owned()] {
         let mut sse = app.events(&jo.token, &[("last-event-id", &bad)]).await;
         let f = sse.next(WAIT).await.unwrap();
         assert_eq!(f.event, "resync", "{bad}");

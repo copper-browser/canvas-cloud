@@ -44,6 +44,9 @@ jobs:
       CANVAS_CLOUD_TEST_CORE_DATABASE_URL: postgres://localhost:5432/cvc_core_test
       CANVAS_CLOUD_TEST_ENGINE_DATABASE_URL: postgres://localhost:5432/cvc_engine_test
       CANVAS_CLOUD_TEST_APPS_DATABASE_URL: postgres://localhost:5432/cvc_apps_test
+      CANVAS_CLOUD_TEST_ACCOUNTS_DATABASE_URL: postgres://localhost:5432/cvc_accounts_test
+      CANVAS_CLOUD_TEST_ACCOUNTS_FRESH_DATABASE_URL: postgres://localhost:5432/cvc_accounts_fresh_test
+      CANVAS_CLOUD_TEST_MCP_DATABASE_URL: postgres://localhost:5432/cvc_mcp_test
       CANVAS_CLOUD_TEST_DATABASE_URL: postgres://localhost:5432/cvc_bin_test
       PGCONNECT_TIMEOUT: 10
     steps:
@@ -59,7 +62,7 @@ jobs:
           # CI-only: trust loopback so tests connect as the runner user without a password.
           sudo sed -i '1i host all all 127.0.0.1/32 trust\nhost all all ::1/128 trust' "$HBA"
           sudo -u postgres psql -w -qc 'SELECT pg_reload_conf()'
-          for db in cvc_core_test cvc_engine_test cvc_apps_test cvc_bin_test; do
+          for db in cvc_core_test cvc_engine_test cvc_apps_test cvc_accounts_test cvc_accounts_fresh_test cvc_mcp_test cvc_bin_test; do
             createdb -w -h localhost "$db"
           done
           psql -w -h localhost -d cvc_core_test -tAc 'SELECT version()'

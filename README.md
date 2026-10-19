@@ -116,6 +116,12 @@ served web app (`web.root`, `web.app_url`), `features` and `limits`. A web app s
   canvases, stats, and the `canvas-cloud apps` CLI.
 - [docs/import-format.md](docs/import-format.md) — import format v1 (NDJSON) and the document
   digest.
+- [docs/auth.md](docs/auth.md) — accounts, the signup policy, personal access tokens, OIDC
+  sign-in and the `/account` page.
+- [docs/events.md](docs/events.md) — `GET /v1/events`, the per-user live event stream.
+- [docs/agents.md](docs/agents.md) — agents: the MCP endpoint (`POST /mcp`), its tools and
+  `/llms.txt`.
+- [docs/openapi.md](docs/openapi.md) — the OpenAPI 3.1 document at `/v1/openapi.json`.
 
 ## Development
 
@@ -128,7 +134,10 @@ cargo test --workspace -j4     # needs native PostgreSQL; see below
 Integration tests use dedicated databases, overridable per crate:
 `CANVAS_CLOUD_TEST_CORE_DATABASE_URL` (`cvc_core_test`),
 `CANVAS_CLOUD_TEST_ENGINE_DATABASE_URL` (`cvc_engine_test`),
-`CANVAS_CLOUD_TEST_APPS_DATABASE_URL` (`cvc_apps_test`) and
+`CANVAS_CLOUD_TEST_APPS_DATABASE_URL` (`cvc_apps_test`),
+`CANVAS_CLOUD_TEST_ACCOUNTS_DATABASE_URL` (`cvc_accounts_test`),
+`CANVAS_CLOUD_TEST_ACCOUNTS_FRESH_DATABASE_URL` (`cvc_accounts_fresh_test`),
+`CANVAS_CLOUD_TEST_MCP_DATABASE_URL` (`cvc_mcp_test`) and
 `CANVAS_CLOUD_TEST_DATABASE_URL` (`cvc_bin_test`). Create them with `createdb`.
 
 ## License

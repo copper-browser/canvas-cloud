@@ -9,7 +9,11 @@
 //!   the last [`RING_CAPACITY`] envelopes, so an SSE client reconnecting with `Last-Event-ID`
 //!   can resume ([`Events::since`]) or be told to resync when its id fell out of the buffer.
 //!
-//! Single-process only (one daemon per instance); ids restart at 1 when the process starts.
+//! Single-process only (one daemon per instance). Ids also increase across restarts: a process
+//! numbers its events from the Unix time it started, in microseconds, so an id issued by an
+//! earlier process is always below every id of the current one and resumes as a gap (resync)
+//! instead of replaying unrelated events (unless an earlier process published more than a
+//! million events a second). Ids stay below 2^53, so JavaScript reads them exactly.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -49,7 +53,8 @@ impl Event {
 /// One published event, as seen by the global tap and the resume buffer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Envelope {
-    /// Process-wide, strictly increasing (starts at 1).
+    /// Strictly increasing, across restarts too (starts at the process start time in Unix
+    /// microseconds).
     pub id: u64,
     /// Whose event it is.
     pub user_id: Uuid,
@@ -95,13 +100,22 @@ impl std::fmt::Debug for Events {
 }
 
 impl Events {
+    /// A bus whose first event id is the current Unix time in microseconds.
     pub fn new() -> Self {
+        let now_us = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(1, |d| u64::try_from(d.as_micros()).unwrap_or(1 << 52));
+        Self::starting_at(now_us)
+    }
+
+    /// A bus whose first event id is `first_id` (at least 1; tests use 1).
+    pub fn starting_at(first_id: u64) -> Self {
         let (tap, _) = broadcast::channel(TAP_CAPACITY);
         Self {
             inner: Arc::new(Mutex::new(Inner {
                 users: HashMap::new(),
                 ring: VecDeque::with_capacity(RING_CAPACITY),
-                next_id: 1,
+                next_id: first_id.max(1),
             })),
             tap,
         }
@@ -189,7 +203,7 @@ impl Events {
         }
     }
 
-    /// The id of the most recently published event (0 = none yet).
+    /// The id of the most recently published event (the first id minus one = none yet).
     pub fn last_id(&self) -> u64 {
         self.lock().next_id - 1
     }
@@ -205,6 +219,18 @@ impl Events {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ids_start_at_the_wall_clock_and_survive_restarts() {
+        let earlier = Events::new();
+        let last_of_earlier = earlier.publish(Uuid::now_v7(), canvas("created"));
+        assert!(last_of_earlier > 1_700_000_000_000_000 && last_of_earlier < (1 << 53));
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let later = Events::new();
+        let first_of_later = later.publish(Uuid::now_v7(), canvas("created"));
+        assert!(first_of_later > last_of_earlier);
+        assert_eq!(later.since(last_of_earlier), Resume::Gap);
+    }
+
     use super::*;
 
     fn canvas(kind: &str) -> Event {
@@ -216,7 +242,7 @@ mod tests {
 
     #[tokio::test]
     async fn fanout_is_per_user() {
-        let ev = Events::new();
+        let ev = Events::starting_at(1);
         let (a, b) = (Uuid::now_v7(), Uuid::now_v7());
         let mut ra1 = ev.subscribe(a);
         let mut ra2 = ev.subscribe(a);
@@ -230,7 +256,7 @@ mod tests {
 
     #[test]
     fn publish_without_subscribers_cleans_up() {
-        let ev = Events::new();
+        let ev = Events::starting_at(1);
         let u = Uuid::now_v7();
         ev.publish(u, canvas("a"));
         drop(ev.subscribe(u));
@@ -240,7 +266,7 @@ mod tests {
 
     #[tokio::test]
     async fn tap_sees_every_user_with_increasing_ids() {
-        let ev = Events::new();
+        let ev = Events::starting_at(1);
         let mut tap = ev.tap();
         let (a, b) = (Uuid::now_v7(), Uuid::now_v7());
         assert_eq!(ev.publish(a, canvas("created")), 1);
@@ -254,7 +280,7 @@ mod tests {
 
     #[test]
     fn resume_replays_or_reports_a_gap() {
-        let ev = Events::new();
+        let ev = Events::starting_at(1);
         let u = Uuid::now_v7();
         assert_eq!(ev.since(0), Resume::Replay(vec![]));
         assert_eq!(ev.since(5), Resume::Gap, "never issued");
@@ -286,7 +312,7 @@ mod tests {
 
     #[tokio::test]
     async fn resume_then_tap_has_no_gap_or_duplicate() {
-        let ev = Events::new();
+        let ev = Events::starting_at(1);
         let u = Uuid::now_v7();
         ev.publish(u, canvas("a"));
         ev.publish(u, canvas("b"));

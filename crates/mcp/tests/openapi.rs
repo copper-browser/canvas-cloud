@@ -170,10 +170,8 @@ fn every_engine_core_and_mcp_route_is_documented() {
     }
 }
 
-/// Un-ignore once `feat/accounts` and `feat/apps` are merged (their routers live in
-/// `crates/accounts` and `crates/apps`).
+/// The accounts and apps routers (`crates/accounts`, `crates/apps`).
 #[test]
-#[ignore = "needs the accounts and apps crates merged"]
 fn every_accounts_and_apps_route_is_documented() {
     // `/account…` is the account page at the root, not an API route.
     let (n, missing_accounts) = missing("accounts", |r| r.starts_with("/account"));

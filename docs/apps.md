@@ -162,10 +162,10 @@ event per user.
 
   On `resync`, re-read whatever the app caches (for example `GET …/canvases`). A stream that
   falls too far behind also gets a `resync`.
-* **Ids** count up from 1 for each process, so a server restart resets them. A
-  `Last-Event-ID` from before a restart that is above the new counter yields `resync`. One at
-  or below it replays the new process's events from that point, so on reconnect after a
-  restart, treat the stream as a fresh start and re-read state.
+* **Ids** only increase, also across server restarts: each server process numbers its events
+  from the time it started, in Unix microseconds (below 2^53, exact in JavaScript). A
+  `Last-Event-ID` from before a restart therefore always yields `resync`; treat ids as opaque
+  except for ordering. These are the same ids as `GET /v1/events`.
 * **Directory refresh.** The stream sees users provisioned after it opened: the server
   refreshes the app's user directory on provisioning changes, and at least every 30 s.
 * **End of stream.** The stream ends when the server shuts down or the app is revoked.

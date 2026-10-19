@@ -1,12 +1,10 @@
 //! `GET /v1/events` — the caller's `canvas` events as Server-Sent Events, with `id:` lines and
 //! `Last-Event-ID` resume from core's ring buffer.
 //!
-//! Ids only increase, across restarts too: `base + n`, where `n` is core's per-process event id
-//! ([`Envelope::id`], restarting at 1 with the process) and `base` the time this server started
-//! in Unix microseconds. A later process's base is above every id an earlier one issued (unless
-//! it published more than a million events a second), so an id from before a restart never
-//! resumes into the new numbering; it gets a `resync` instead. Ids stay below 2^53, so
-//! JavaScript reads them exactly.
+//! Ids only increase, across restarts too: they are core's event ids ([`Envelope::id`]), which
+//! each process numbers from its start time in Unix microseconds, so an id from before a
+//! restart never resumes into the new numbering; it gets a `resync` instead. Ids stay below
+//! 2^53, so JavaScript reads them exactly. (`base` is an offset kept at 0.)
 //!
 //! Frames:
 //!
@@ -23,7 +21,7 @@
 //! [`REVALIDATE_EVERY`]) or the server shuts down.
 
 use std::convert::Infallible;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use axum::extract::State;
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue};
@@ -52,13 +50,6 @@ pub const REVALIDATE_EVERY: Duration = Duration::from_secs(60);
 pub(crate) struct EventsQuery {
     /// For clients that cannot set `Last-Event-ID` on the first connection.
     last_event_id: Option<String>,
-}
-
-/// This process's id base: the current Unix time in microseconds.
-pub(crate) fn id_base_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX / 2))
 }
 
 /// The SSE id of core event `n`.
@@ -278,19 +269,17 @@ mod tests {
 
     #[test]
     fn wire_ids() {
-        let base = id_base_now();
-        assert!(base > 1_700_000_000_000_000 && base < (1 << 53), "{base}");
+        let base = 1_792_000_000_000_000;
         assert_eq!(wire_id(base, 7), base + 7);
         assert_eq!(local_id(base, base + 7), Some(7));
         assert_eq!(local_id(base, base), Some(0));
         assert_eq!(local_id(base, base - 1), None, "an earlier process");
         assert_eq!(local_id(base, 7), None, "a bare core id");
-        assert!(id_base_now() >= base);
     }
 
     #[test]
     fn subscribe_positions() {
-        let ev = Events::new();
+        let ev = Events::starting_at(1);
         let u = Uuid::now_v7();
         let canvas = Event::Canvas {
             canvas_id: Uuid::nil(),

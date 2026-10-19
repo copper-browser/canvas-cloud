@@ -52,8 +52,8 @@ whenever this connection fell more than 256 events behind.
 
 ## Ids and resuming
 
-Every event has an id that only increases, also across server restarts: the server's start
-time in Unix microseconds plus a per-process counter. Ids stay below 2^53, so JavaScript
+Every event has an id that only increases, also across server restarts: each server process
+numbers its events from the time it started, in Unix microseconds. Ids stay below 2^53, so JavaScript
 numbers hold them exactly; treat them as opaque except for ordering.
 
 Reconnect with the last id you saw (`EventSource` does this by itself with the
