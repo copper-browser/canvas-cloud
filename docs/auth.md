@@ -138,6 +138,31 @@ login and password changes are additionally limited per (lower-cased) email with
 budget, so spreading guesses for one account over many IPs does not help. Both answer
 `429 rate_limited`.
 
+### Examples
+
+```sh
+S=https://canvas.example.com
+
+# Sign up (or sign in with /v1/auth/login and the same body without display_name).
+curl -s -X POST $S/v1/auth/signup -H 'Content-Type: application/json' \
+  -d '{"email":"ada@example.org","password":"correct horse battery","display_name":"Ada"}'
+# → 201 {"token":"cvs_…","user":{"id":"…","email":"ada@example.org","display_name":"Ada","created_at":"…"}}
+
+SESSION=cvs_…
+curl -s $S/v1/auth/me -H "Authorization: Bearer $SESSION"
+# → {"user":{…},"via":{"kind":"session"}}
+
+# A read-only token for a script, valid 30 days. Save "token" now; it is not shown again.
+curl -s -X POST $S/v1/tokens -H "Authorization: Bearer $SESSION" -H 'Content-Type: application/json' \
+  -d '{"name":"ci","scope":"read","expires_in_days":30}'
+# → 201 {"token":"cvt_…","id":"…","name":"ci","scope":"read","created_at":"…","last_used_at":null,"expires_at":"…"}
+
+curl -s $S/v1/canvases -H "Authorization: Bearer cvt_…"          # works with the token
+curl -s -X DELETE $S/v1/tokens/<id> -H "Authorization: Bearer $SESSION"   # → {"ok":true}
+
+curl -s -X POST $S/v1/auth/logout -H "Authorization: Bearer $SESSION"     # → {"ok":true,"revoked":1}
+```
+
 ## OIDC sign-in
 
 Any OpenID Connect provider with discovery works (Google, Microsoft Entra, GitLab,
