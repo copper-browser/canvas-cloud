@@ -6,6 +6,7 @@ use canvas_cloud_core::state::AppState;
 use uuid::Uuid;
 
 use crate::rest::{member_ids, publish};
+pub use crate::room::open_rooms;
 use crate::room::rooms;
 
 /// Delete any canvas (Personal ones too — the owner gets a fresh empty one on next use):
@@ -54,4 +55,25 @@ pub fn canvases_deleted(state: &AppState, deleted: &[(Uuid, Vec<Uuid>)]) {
 /// Disconnect every live canvas peer of `user_id` (account disabled or deleted).
 pub fn disconnect_user(user_id: Uuid) {
     rooms().kick_user_everywhere(user_id);
+}
+
+/// Close the room of a canvas that is gone (deleted in the database by the caller): its
+/// peers are disconnected with close 4404. No event is published. A no-op when the room is
+/// not in memory.
+pub fn close_room(canvas_id: Uuid) {
+    rooms().close(canvas_id);
+}
+
+/// Runs `f` — typically a transaction that deletes canvas `canvas_id` and stores a new
+/// document under the **same id** (an import replacing it) — with the canvas's room shut:
+///
+/// * connected peers are disconnected with close 1001 ("going away"), not 4404: the canvas
+///   still exists, so clients reconnect and sync the new document;
+/// * a write already in progress finishes first (under the old document); every later read
+///   or write of the room waits until `f` is done and then fails with 404, so nothing is ever
+///   persisted against the replaced document's key;
+/// * afterwards the room is dropped from memory, so the next use loads the new document from
+///   the database.
+pub async fn with_room_shut<F: std::future::Future>(canvas_id: Uuid, f: F) -> F::Output {
+    rooms().shut_while(canvas_id, f).await
 }

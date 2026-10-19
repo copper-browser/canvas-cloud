@@ -1129,8 +1129,16 @@ pub async fn join_share_link(
 // ---------------------------------------------------------------------------------------------
 // People
 
-/// Other enabled users matching `q` (display name or email substring; all when empty),
-/// at most `limit` (default 20, capped at 50). REST wraps them as `{"people":[…]}`.
+/// The people directory: other enabled users matching `q` (display name or email substring;
+/// all when empty), at most `limit` (default 20, capped at 50). REST wraps them as
+/// `{"people":[…]}`.
+///
+/// Who is in the caller's directory:
+///
+/// * a linked app acting for one of its users (`Via::App`) → the other users linked to that
+///   same app (an app's users see exactly their own directory, never another app's);
+/// * anyone else (session, access token) → the users who share at least one canvas with the
+///   caller.
 pub async fn list_people(
     state: &SharedState,
     user: &AuthUser,
@@ -1144,16 +1152,25 @@ pub async fn list_people(
     let limit = limit.min(50);
     let needle = q.unwrap_or_default();
     let people = sqlx::query_as::<_, PersonView>(
-        "SELECT id, display_name, email FROM users
-         WHERE NOT disabled AND id <> $1
-           AND ($2 = '' OR strpos(lower(display_name), lower($2)) > 0
-                OR strpos(lower(email), lower($2)) > 0)
-         ORDER BY lower(display_name), id
+        "SELECT u.id, u.display_name, u.email FROM users u
+         WHERE NOT u.disabled AND u.id <> $1
+           AND ($2 = '' OR strpos(lower(u.display_name), lower($2)) > 0
+                OR strpos(lower(u.email), lower($2)) > 0)
+           AND CASE WHEN $4::uuid IS NOT NULL THEN
+                    EXISTS (SELECT 1 FROM app_users au
+                            WHERE au.app_id = $4 AND au.user_id = u.id)
+               ELSE
+                    EXISTS (SELECT 1 FROM canvas_members mine
+                            JOIN canvas_members theirs ON theirs.canvas_id = mine.canvas_id
+                            WHERE mine.user_id = $1 AND theirs.user_id = u.id)
+               END
+         ORDER BY lower(u.display_name), u.id
          LIMIT $3",
     )
     .bind(user.user_id)
     .bind(needle)
     .bind(limit)
+    .bind(user.app_id())
     .fetch_all(&state.db)
     .await?;
     Ok(people)

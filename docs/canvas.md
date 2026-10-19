@@ -195,11 +195,18 @@ carries `chat`: the last 50 messages of the canvas chat, oldest first (see
 
 ### `GET /people`
 
-Any signed-in user may list active accounts on this instance (excluding themselves):
-`{"people":[{"id","display_name","email"}]}`. `q` is a case-insensitive substring filter
-on display name or email; results are sorted by display name. `limit` defaults to 20 and is
-capped at 50. This is an intentional team-server directory surface; it is not restricted to
-canvas members.
+The caller's people directory (for picking whom to invite or @mention):
+`{"people":[{"id","display_name","email"}]}`, active accounts only, never the caller. `q`
+is a case-insensitive substring filter on display name or email; results are sorted by
+display name. `limit` defaults to 20 and is capped at 50.
+
+Who is in the directory depends on how the caller signed in:
+
+* a **linked app** acting for one of its users (`X-Canvas-User`) — every other user linked
+  to that same app, so each app's users see exactly their own directory and never another
+  app's (see [apps.md](apps.md));
+* anyone else (a session or a personal access token) — the users who share at least one
+  canvas with the caller.
 
 ### `POST /canvases/{id}/ops`
 
