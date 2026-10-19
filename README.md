@@ -48,7 +48,9 @@ printf 'a long password\n' > pw && \
 ```
 
 On a Linux server, the installer sets everything up (binary, service user, native
-PostgreSQL role and database, config with a fresh master key, certificate, systemd unit):
+PostgreSQL role and database, config with a fresh master key, certificate, systemd unit;
+inputs such as `CANVAS_CLOUD_DOMAIN` or `CANVAS_CLOUD_LISTEN` + `CANVAS_CLOUD_TLS_MODE=off`
+for a reverse proxy are in [docs/install.md](docs/install.md)):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/copper-browser/canvas-cloud/main/install.sh | sudo sh
@@ -56,89 +58,37 @@ curl -fsSL https://raw.githubusercontent.com/copper-browser/canvas-cloud/main/in
 
 ## Command line
 
-| Command | What |
-|---|---|
-| `serve [--no-migrate]` | run the server (the default command) |
-| `migrate` | apply pending migrations |
-| `doctor` | check config, database, migrations, TLS, the listener, web root and metrics |
-| `healthcheck --wait N` | wait until `/healthz` answers |
-| `tls-init [--force] [--name N]` | create the self-signed certificate |
-| `gen-config --write PATH` | write a new 0600 config with a fresh master key (`-` prints it) |
-| `admin users list\|create\|disable\|enable\|delete\|set-password` | accounts (`--password-file`, never argv) |
-| `admin settings get` / `set allow_signup true\|false` / `set signup_domains a.com,b.com` | signup policy |
-| `apps create --name N [--allow-import] [--no-trust-email]` / `list` / `revoke ID` / `rotate ID` | linked apps (the `cva_…` key is printed once) |
+`canvas-cloud serve` (the default), `migrate`, `doctor`, `healthcheck`, `tls-init`,
+`gen-config`, `version`, and the admin commands `admin users …`, `admin settings …` and
+`apps …` (linked apps). Every command and flag: [docs/operations.md](docs/operations.md#command-line).
 
 ## Configuration
 
-TOML at `/etc/canvas-cloud/canvas-cloud.toml` (or `--config`, or `CANVAS_CLOUD_CONFIG`).
-Every key can be overridden from the environment: `CANVAS_CLOUD_<KEY>`, nested keys with
-`__` (`CANVAS_CLOUD_TLS__MODE=off`), lists comma-separated.
+One TOML file (`/etc/canvas-cloud/canvas-cloud.toml`, or `--config`, or
+`CANVAS_CLOUD_CONFIG`), every key overridable from the environment as
+`CANVAS_CLOUD_<KEY>` (nested keys with `__`, e.g. `CANVAS_CLOUD_TLS__MODE=off`). Every key,
+default and example: [docs/configuration.md](docs/configuration.md).
 
-| Key | Default | Meaning |
-|---|---|---|
-| `listen` | `0.0.0.0:443` | listen address |
-| `public_url` | derived from `listen`/`tls` | base URL clients use, e.g. `https://canvas.example.com` |
-| `database_url` | — (required) | `postgres://…` |
-| `db_max_connections` | `20` | pool size |
-| `master_key` | — (required) | base64url, 32 bytes; wraps every canvas key. **Back it up.** |
-| `trust_proxy` | `false` | honour `X-Forwarded-For` (only behind a proxy) |
-| `web_root` | unset | directory with a built web app (`index.html`); served at `/` for every GET no API route claims |
-| `web_app_url` | unset | where `/join/{token}` share links go (`{token}` substituted); defaults to `{public_url}/#/join/{token}` when `web_root` is set |
-| `metrics_listen` | `127.0.0.1:9474` | Prometheus `/metrics`; `"off"` disables |
-| `log_format` / `log_level` | `json` / `info` | logging (`RUST_LOG` overrides the level) |
-| `tls.mode` | `self-signed` | `self-signed`, `acme` (Let's Encrypt, needs `tls.domain` and :443) or `off` (behind a TLS proxy) |
-| `tls.cert_path` / `tls.key_path` | `/var/lib/canvas-cloud/tls/{cert,key}.pem` | certificate files |
-| `tls.domain` / `tls.acme_email` / `tls.acme_cache_dir` / `tls.acme_staging` | — | ACME settings |
-| `cors.allowed_origins` | `[]` | other browser origins allowed to call the API (exact match); the `web_root` app is same-origin and needs none |
-| `ops.extra_url_schemes` | `[]` | URL schemes accepted in link shapes besides `http`, `https`, `mailto` |
-| `limits.auth_per_minute` | `10` | requests per minute per IP on `/v1/auth/*` |
-| `limits.import_max_bytes` / `limits.import_max_line_bytes` | 512 MiB / 32 MiB | import limits for linked apps |
-| `[[oidc]]` | none | sign-in providers: `id`, `name`, `issuer`, `client_id`, `client_secret_file`, `allowed_domains`, `redirect_uris` |
-
-For local development of a canvas web app against this server:
-
-```toml
-[cors]
-allowed_origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
-```
-
-`GET /v1/info` (public) tells a client what the server offers: name, version,
-`public_url`, whether signup is open, sign-in methods (`auth.password`, `auth.oidc`), the
-served web app (`web.root`, `web.app_url`), `features` and `limits`. A web app served from
-`web_root` probes its own origin's `/v1/info` to find out it is running on canvas-cloud.
+`GET /v1/info` (public) tells a client what the server offers: name, version, `public_url`,
+whether signup is open, sign-in methods, the served web app, `features` and `limits`.
 
 ## Docs
 
-- [docs/canvas.md](docs/canvas.md) — the canvas REST API, rooms, limits, metrics, security.
-- [docs/canvas-protocol.md](docs/canvas-protocol.md) — the WebSocket protocol, document
-  schema, ops and read formats.
-- [docs/apps.md](docs/apps.md) — linked apps: `/v1/apps/self/*` provisioning, events,
-  canvases, stats, and the `canvas-cloud apps` CLI.
-- [docs/import-format.md](docs/import-format.md) — import format v1 (NDJSON) and the document
-  digest.
-- [docs/auth.md](docs/auth.md) — accounts, the signup policy, personal access tokens, OIDC
-  sign-in and the `/account` page.
-- [docs/events.md](docs/events.md) — `GET /v1/events`, the per-user live event stream.
-- [docs/agents.md](docs/agents.md) — agents: the MCP endpoint (`POST /mcp`), its tools and
-  `/llms.txt`.
-- [docs/openapi.md](docs/openapi.md) — the OpenAPI 3.1 document at `/v1/openapi.json`.
+[docs/README.md](docs/README.md) indexes everything. Start with:
+
+- [Install](docs/install.md) — the installer, tarballs, source, reverse proxies, TLS.
+- [Operate](docs/operations.md) — backups, upgrades, metrics, troubleshooting.
+- [Canvases](docs/canvas.md) and the [canvas protocol](docs/canvas-protocol.md) — the API and
+  the WebSocket protocol clients speak.
+- [Linked apps](docs/apps.md), [agents and MCP](docs/agents.md), [accounts and
+  sign-in](docs/auth.md).
+- [Security](docs/security.md) — and [SECURITY.md](SECURITY.md) to report a vulnerability.
+- Release notes: [CHANGELOG.md](CHANGELOG.md).
 
 ## Development
 
-```sh
-cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace -j4     # needs native PostgreSQL; see below
-```
-
-Integration tests use dedicated databases, overridable per crate:
-`CANVAS_CLOUD_TEST_CORE_DATABASE_URL` (`cvc_core_test`),
-`CANVAS_CLOUD_TEST_ENGINE_DATABASE_URL` (`cvc_engine_test`),
-`CANVAS_CLOUD_TEST_APPS_DATABASE_URL` (`cvc_apps_test`),
-`CANVAS_CLOUD_TEST_ACCOUNTS_DATABASE_URL` (`cvc_accounts_test`),
-`CANVAS_CLOUD_TEST_ACCOUNTS_FRESH_DATABASE_URL` (`cvc_accounts_fresh_test`),
-`CANVAS_CLOUD_TEST_MCP_DATABASE_URL` (`cvc_mcp_test`) and
-`CANVAS_CLOUD_TEST_DATABASE_URL` (`cvc_bin_test`). Create them with `createdb`.
+See [CONTRIBUTING.md](CONTRIBUTING.md): native PostgreSQL test databases, `cargo fmt`,
+`cargo clippy -D warnings` and `cargo test`.
 
 ## License
 
