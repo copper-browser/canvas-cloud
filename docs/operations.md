@@ -178,7 +178,8 @@ sudo canvas-cloud doctor
 A newer binary applies its newer migrations to the restored database at start. This round
 trip (dump, restore into a fresh database, read a canvas with the same key, and the `500`
 with a different key) was checked against v0.1.0. Use a `pg_dump` / `pg_restore` of the
-server's major version or newer.
+server's major version or newer (a newer `pg_restore` may report one ignorable error about
+`transaction_timeout` on an older server).
 
 To move a server, restore the dump on the new host and copy the config (with its master key)
 and the state directory, then start it.
