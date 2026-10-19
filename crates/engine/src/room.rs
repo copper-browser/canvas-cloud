@@ -2,7 +2,9 @@
 //!
 //! Write path (WebSocket updates, REST ops, server-side meta edits): take the room's write
 //! lock → apply in one `yrs` transaction → seal + INSERT the produced update → broadcast it →
-//! compact every [`COMPACT_EVERY`] updates. The lock is held across the INSERT, so persisted
+//! compact every [`COMPACT_EVERY`] updates (a snapshot is written only when it provably
+//! re-applies to the same document, see [`crate::compact`]; the room's `Doc` never
+//! garbage-collects in memory). The lock is held across the INSERT, so persisted
 //! order == application order == broadcast order, and nobody ever observes an update that is
 //! not durable. If persisting fails the in-memory doc is dropped (the room reloads from the
 //! database on next use) and every peer is disconnected; y-websocket clients reconnect and
@@ -28,6 +30,7 @@ use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::Encode;
 use yrs::{ClientID, Doc, ReadTxn, StateVector, Transact, TransactionMut, Update};
 
+use crate::compact::{compact_state, server_doc};
 use crate::store;
 use crate::ws::close;
 
@@ -91,7 +94,7 @@ pub(crate) struct DocState {
 impl DocState {
     async fn load(state: &AppState, canvas_id: Uuid) -> Result<Self, ApiError> {
         let stored = store::load(&state.db, &state.crypto, canvas_id).await?;
-        let doc = Doc::new();
+        let doc = server_doc();
         let mut last_seq = stored.snapshot.as_ref().map_or(0, |s| s.0);
         {
             let mut txn = doc.transact_mut();
@@ -274,18 +277,28 @@ impl Room {
             echo: false,
         });
         if st.since_snapshot >= COMPACT_EVERY {
-            let snapshot = st
-                .doc
-                .transact()
-                .encode_state_as_update_v1(&StateVector::default());
-            match store::compact(&state.db, &st.key, self.id, st.last_seq, &snapshot).await {
-                Ok(deleted) => {
-                    tracing::debug!(canvas_id = %self.id, deleted, "canvas compacted");
-                    st.since_snapshot = 0;
+            if let Some(snapshot) = compact_state(&st.doc.transact()) {
+                match store::compact(&state.db, &st.key, self.id, st.last_seq, &snapshot.state)
+                    .await
+                {
+                    Ok(deleted) => {
+                        tracing::debug!(
+                            canvas_id = %self.id,
+                            deleted,
+                            collected = snapshot.collected,
+                            "canvas compacted"
+                        );
+                        st.since_snapshot = 0;
+                    }
+                    Err(e) => {
+                        tracing::warn!(canvas_id = %self.id, error = %e, "canvas compaction failed");
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!(canvas_id = %self.id, error = %e, "canvas compaction failed");
-                }
+            } else {
+                // Not compactable now (see `compact`): the log stays the record. Try again
+                // after another `COMPACT_EVERY` updates, not on every update.
+                tracing::warn!(canvas_id = %self.id, "canvas not compacted: keeping its update log");
+                st.since_snapshot = 0;
             }
         }
         drop(g);

@@ -24,6 +24,8 @@ use canvas_cloud_core::state::SharedState;
 pub mod admin;
 pub mod chat;
 pub mod checklist;
+pub mod compact;
+pub mod digest;
 pub mod geometry;
 mod http;
 pub mod mentions;
