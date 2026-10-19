@@ -1,0 +1,52 @@
+[Unit]
+Description=Canvas Cloud (real-time collaborative canvas server)
+Documentation=https://github.com/copper-browser/canvas-cloud
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=canvas-cloud
+Group=canvas-cloud
+Environment=CANVAS_CLOUD_CONFIG=/etc/canvas-cloud/canvas-cloud.toml
+ExecStart=/usr/local/bin/canvas-cloud serve
+Restart=always
+RestartSec=2
+KillSignal=SIGTERM
+TimeoutStopSec=20
+LimitNOFILE=65536
+
+# Bind :443 without root.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+# Sandboxing. The config is read-only; the certificate and ACME state live in
+# /var/lib/canvas-cloud (StateDirectory). A web_root outside /home stays readable.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+StateDirectory=canvas-cloud
+StateDirectoryMode=0750
+ReadOnlyPaths=/etc/canvas-cloud
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

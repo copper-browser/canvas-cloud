@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  # Explicit worker cap for every cargo invocation (build jobs and test threads below).
+  CARGO_BUILD_JOBS: 4
+
+jobs:
+  lint:
+    name: fmt + clippy + shellcheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo fmt
+        run: cargo fmt --all --check
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --locked -j4 -- -D warnings
+      - name: shellcheck install.sh
+        run: shellcheck -s sh install.sh
+      - name: install.sh embedded unit matches packaging/canvas-cloud.service
+        run: sh install.sh --print-unit | diff -u packaging/canvas-cloud.service -
+
+  test:
+    name: cargo test (native PostgreSQL)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CANVAS_CLOUD_TEST_CORE_DATABASE_URL: postgres://localhost:5432/cvc_core_test
+      CANVAS_CLOUD_TEST_ENGINE_DATABASE_URL: postgres://localhost:5432/cvc_engine_test
+      CANVAS_CLOUD_TEST_DATABASE_URL: postgres://localhost:5432/cvc_bin_test
+      PGCONNECT_TIMEOUT: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The PostgreSQL that ships preinstalled on the ubuntu runner image. No containers.
+      - name: Start PostgreSQL
+        run: |
+          sudo systemctl start postgresql.service
+          sudo -u postgres createuser --superuser "$USER"
+          HBA=$(sudo -u postgres psql -w -tAc 'SHOW hba_file')
+          # CI-only: trust loopback so tests connect as the runner user without a password.
+          sudo sed -i '1i host all all 127.0.0.1/32 trust\nhost all all ::1/128 trust' "$HBA"
+          sudo -u postgres psql -w -qc 'SELECT pg_reload_conf()'
+          for db in cvc_core_test cvc_engine_test cvc_bin_test; do
+            createdb -w -h localhost "$db"
+          done
+          psql -w -h localhost -d cvc_core_test -tAc 'SELECT version()'
+      - name: cargo test
+        run: cargo test --workspace --locked -j4 -- --test-threads=4
+      - name: CLI smoke test
+        run: |
+          cargo build --locked -j4 -q
+          bin=target/debug/canvas-cloud
+          cfg="$RUNNER_TEMP/canvas-cloud.toml"
+          $bin gen-config --write "$cfg" --tls-mode off --listen 127.0.0.1:18480 \
+            --database-url postgres://localhost:5432/cvc_bin_test --state-dir "$RUNNER_TEMP/state"
+          $bin --config "$cfg" migrate
+          $bin --config "$cfg" serve --no-migrate &
+          pid=$!
+          $bin --config "$cfg" healthcheck --wait 30
+          curl -fsS http://127.0.0.1:18480/v1/info | grep -q '"name":"canvas-cloud"'
+          kill "$pid"
+          wait "$pid" || true
+
+  build:
+    name: release build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo build --release
+        run: cargo build --release --locked -j4 -p canvas-cloud
+      - name: binary runs
+        run: |
+          file target/release/canvas-cloud
+          target/release/canvas-cloud version

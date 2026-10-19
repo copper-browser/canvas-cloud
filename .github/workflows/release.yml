@@ -1,0 +1,90 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # Explicit worker cap for every cargo invocation (build jobs).
+  CARGO_BUILD_JOBS: 4
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: true
+      matrix:
+        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check tag matches the crate version
+        run: |
+          crate=$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"]=="canvas-cloud"))')
+          tag="${GITHUB_REF_NAME#v}"
+          [ "$crate" = "$tag" ] || { echo "tag $GITHUB_REF_NAME != crate version $crate"; exit 1; }
+          echo "VERSION=$tag" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.1
+      - name: Install cargo-zigbuild
+        run: cargo install --locked -j4 cargo-zigbuild
+      - name: Build (glibc 2.28 baseline)
+        env:
+          CANVAS_CLOUD_GIT_SHA: ${{ github.sha }}
+        run: cargo zigbuild --release --locked -j4 -p canvas-cloud --target ${{ matrix.target }}.2.28
+      - name: Package
+        run: |
+          name="canvas-cloud-${VERSION}-${{ matrix.target }}"
+          stage="$RUNNER_TEMP/$name"
+          mkdir -p "$stage/packaging" dist
+          cp "target/${{ matrix.target }}/release/canvas-cloud" "$stage/canvas-cloud"
+          cp install.sh "$stage/install.sh"
+          cp packaging/canvas-cloud.service "$stage/packaging/canvas-cloud.service"
+          cp README.md "$stage/README.md"
+          cp LICENSE "$stage/LICENSE"
+          chmod 0755 "$stage/canvas-cloud" "$stage/install.sh"
+          file "$stage/canvas-cloud"
+          # Files at the archive root: `tar xzf … && sudo ./install.sh`.
+          tar -C "$stage" -czf "dist/$name.tar.gz" canvas-cloud install.sh packaging README.md LICENSE
+          (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+          cat "dist/$name.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: publish GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+      - name: SHA256SUMS
+        run: |
+          cat dist/*.sha256 > dist/SHA256SUMS
+          rm dist/*.sha256
+          cat dist/SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
