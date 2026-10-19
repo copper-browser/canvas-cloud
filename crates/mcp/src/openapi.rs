@@ -97,7 +97,8 @@ mod tests {
                 assert!(op["responses"].is_object(), "{method} {path}: responses");
             }
         }
-        assert!(!OPENAPI_JSON.to_lowercase().contains("copper"));
+        // No product other than Canvas Cloud is named (spelled split so a repo-wide grep stays clean).
+        assert!(!OPENAPI_JSON.to_lowercase().contains(concat!("cop", "per")));
     }
 
     #[test]

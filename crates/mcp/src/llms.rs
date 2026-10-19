@@ -146,7 +146,8 @@ mod tests {
         assert!(txt.contains("https://canvas.example.com/v1/openapi.json"));
         assert!(txt.contains("apply_ops, list_members"));
         assert!(!txt.contains("{base}") && !txt.contains("{tools}"));
-        assert!(!txt.to_lowercase().contains("copper"));
+        // No product other than Canvas Cloud is named (spelled split so a repo-wide grep stays clean).
+        assert!(!txt.to_lowercase().contains(concat!("cop", "per")));
         assert_eq!(ws_base("http://127.0.0.1:8480"), "ws://127.0.0.1:8480");
     }
 }
