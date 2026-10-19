@@ -1,5 +1,5 @@
 //! The composed binary app and the admin CLI against native Postgres
-//! (`CANVAS_CLOUD_TEST_DATABASE_URL`, default `postgres://farce@localhost:5433/cvc_bin_test`).
+//! (`CANVAS_CLOUD_TEST_DATABASE_URL`, default `postgres://localhost:5432/cvc_bin_test`).
 
 #![allow(clippy::too_many_lines)]
 
@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 fn database_url() -> String {
     std::env::var("CANVAS_CLOUD_TEST_DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://farce@localhost:5433/cvc_bin_test".into())
+        .unwrap_or_else(|_| "postgres://localhost:5432/cvc_bin_test".into())
 }
 
 static MIGRATED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
@@ -32,7 +32,7 @@ async fn state_with(f: impl FnOnce(&mut Config)) -> SharedState {
         .max_connections(4)
         .connect(&cfg.database_url)
         .await
-        .expect("connecting (createdb -w -h localhost -p 5433 cvc_bin_test)");
+        .expect("connecting (createdb -w -h localhost cvc_bin_test)");
     MIGRATED
         .get_or_init(|| async {
             canvas_cloud_core::db::migrate(&pool)

@@ -1,7 +1,7 @@
 //! Test harness for the agent seams: a real server (core + engine + mcp routers, exactly as
 //! `canvas_cloud::app` composes them, minus the crates this one cannot depend on) on an
 //! ephemeral port, over native PostgreSQL (`CANVAS_CLOUD_TEST_MCP_DATABASE_URL`, default
-//! `postgres://farce@localhost:5433/cvc_mcp_test`), with an HTTP MCP client and a minimal
+//! `postgres://localhost:5432/cvc_mcp_test`), with an HTTP MCP client and a minimal
 //! y-websocket peer.
 
 #![allow(dead_code, clippy::missing_panics_doc)]
@@ -32,7 +32,7 @@ use yrs::updates::decoder::{Decode as _, DecoderV1};
 use yrs::updates::encoder::Encode as _;
 use yrs::{Doc, Map as _, ReadTxn as _, Transact as _, Update};
 
-pub const DATABASE_URL: &str = "postgres://farce@localhost:5433/cvc_mcp_test";
+pub const DATABASE_URL: &str = "postgres://localhost:5432/cvc_mcp_test";
 
 pub fn database_url() -> String {
     std::env::var("CANVAS_CLOUD_TEST_MCP_DATABASE_URL").unwrap_or_else(|_| DATABASE_URL.to_owned())
@@ -89,7 +89,7 @@ impl TestApp {
             .await
             .expect(
                 "connecting to the mcp test database \
-                 (createdb -w -h localhost -p 5433 cvc_mcp_test)",
+                 (createdb -w -h localhost cvc_mcp_test)",
             );
         migrate(&pool).await;
         let state = AppState::new(pool, cfg);

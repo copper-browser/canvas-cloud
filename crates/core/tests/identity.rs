@@ -1,6 +1,6 @@
 //! Identity rules (CONTRACT §4) against a real native Postgres
 //! (`CANVAS_CLOUD_TEST_CORE_DATABASE_URL`, default
-//! `postgres://farce@localhost:5433/cvc_core_test`): sessions, personal access tokens, app
+//! `postgres://localhost:5432/cvc_core_test`): sessions, personal access tokens, app
 //! keys, the extractors and the store helpers, through the real `app_with` stack.
 
 #![allow(clippy::missing_panics_doc, clippy::too_many_lines)]
@@ -22,7 +22,7 @@ use sqlx::PgPool;
 use tower::ServiceExt as _;
 use uuid::Uuid;
 
-const DATABASE_URL: &str = "postgres://farce@localhost:5433/cvc_core_test";
+const DATABASE_URL: &str = "postgres://localhost:5432/cvc_core_test";
 
 fn database_url() -> String {
     std::env::var("CANVAS_CLOUD_TEST_CORE_DATABASE_URL").unwrap_or_else(|_| DATABASE_URL.into())
@@ -36,7 +36,7 @@ async fn state() -> SharedState {
         .max_connections(4)
         .connect(&cfg.database_url)
         .await
-        .expect("connecting (createdb -w -h localhost -p 5433 cvc_core_test)");
+        .expect("connecting (createdb -w -h localhost cvc_core_test)");
     MIGRATED
         .get_or_init(|| async {
             canvas_cloud_core::db::migrate(&pool)

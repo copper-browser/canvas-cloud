@@ -1,6 +1,6 @@
 //! Shared integration-test harness for the linked-apps routes: real native Postgres
 //! (`CANVAS_CLOUD_TEST_APPS_DATABASE_URL`, default
-//! `postgres://farce@localhost:5433/cvc_apps_test`), the real core app with the engine and
+//! `postgres://localhost:5432/cvc_apps_test`), the real core app with the engine and
 //! apps routers on an ephemeral port, users/sessions/apps inserted through core's identity
 //! helpers, an SSE reader and a minimal y-websocket client (`yrs` + tokio-tungstenite).
 
@@ -36,7 +36,7 @@ use yrs::updates::decoder::{Decode as _, DecoderV1};
 use yrs::updates::encoder::Encode as _;
 use yrs::{Doc, ReadTxn as _, StateVector, Transact as _, TransactionMut, Update};
 
-pub const DATABASE_URL: &str = "postgres://farce@localhost:5433/cvc_apps_test";
+pub const DATABASE_URL: &str = "postgres://localhost:5432/cvc_apps_test";
 pub const T: Duration = Duration::from_secs(5);
 
 /// The test database: `CANVAS_CLOUD_TEST_APPS_DATABASE_URL`, else [`DATABASE_URL`].
@@ -122,7 +122,9 @@ impl TestApp {
             .acquire_timeout(Duration::from_secs(30))
             .connect(&cfg.database_url)
             .await
-            .expect("connecting to the apps test database (createdb -w -h localhost -p 5433 cvc_apps_test)");
+            .expect(
+                "connecting to the apps test database (createdb -w -h localhost cvc_apps_test)",
+            );
         migrate(&pool).await;
         let state = AppState::new(pool, cfg);
         let router = canvas_cloud_core::app_with(

@@ -1,6 +1,6 @@
 //! Shared integration-test harness: real native Postgres
 //! (`CANVAS_CLOUD_TEST_ENGINE_DATABASE_URL`, default
-//! `postgres://farce@localhost:5433/cvc_engine_test`), the real core app + engine routers on
+//! `postgres://localhost:5432/cvc_engine_test`), the real core app + engine routers on
 //! an ephemeral port, users/sessions/tokens/apps inserted through core's identity helpers,
 //! and a minimal y-websocket client built on `yrs` + tokio-tungstenite.
 
@@ -42,7 +42,7 @@ use yrs::{
     ClientID, Doc, Map as _, Out, ReadTxn as _, StateVector, Transact as _, TransactionMut, Update,
 };
 
-pub const DATABASE_URL: &str = "postgres://farce@localhost:5433/cvc_engine_test";
+pub const DATABASE_URL: &str = "postgres://localhost:5432/cvc_engine_test";
 
 /// The test database: `CANVAS_CLOUD_TEST_ENGINE_DATABASE_URL`, else [`DATABASE_URL`] — so
 /// parallel checkouts can each test against their own database.
@@ -121,7 +121,7 @@ impl TestApp {
             .await
             .expect(
                 "connecting to the engine test database \
-                 (createdb -w -h localhost -p 5433 cvc_engine_test)",
+                 (createdb -w -h localhost cvc_engine_test)",
             );
         migrate(&pool).await;
         let state = AppState::new(pool, cfg);

@@ -1,7 +1,7 @@
 //! The signup policy, which depends on instance-wide state (whether any password account
 //! exists, the `allow_signup` / `signup_domains` settings). Runs on its own database
 //! (`CANVAS_CLOUD_TEST_ACCOUNTS_FRESH_DATABASE_URL`, default
-//! `postgres://farce@localhost:5433/cvc_accounts_fresh_test`) whose schema is dropped and
+//! `postgres://localhost:5432/cvc_accounts_fresh_test`) whose schema is dropped and
 //! recreated at the start, with every test serialized and starting from an empty `users`.
 
 #![allow(clippy::too_many_lines)]
@@ -19,7 +19,7 @@ static SERIAL: Mutex<()> = Mutex::const_new(());
 
 fn database_url() -> String {
     std::env::var("CANVAS_CLOUD_TEST_ACCOUNTS_FRESH_DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://farce@localhost:5433/cvc_accounts_fresh_test".into())
+        .unwrap_or_else(|_| "postgres://localhost:5432/cvc_accounts_fresh_test".into())
 }
 
 /// A server over an emptied database (no users, default settings).

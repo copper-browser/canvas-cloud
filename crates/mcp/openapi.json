@@ -314,7 +314,7 @@
         "tags": ["documents"],
         "operationId": "canvasWebSocket",
         "summary": "Join the live room (y-websocket)",
-        "description": "Upgrade to a WebSocket speaking the standard y-websocket protocol (sync step 1/2 and updates in lib0 v1 encoding, awareness). HTTP/2 extended CONNECT also works. Browsers pass `?token=`. Read-only tokens are refused (`403 read_only_token`). Messages ≤ 4 MiB. Close codes: `4401` credential no longer valid, `4403` removed from the canvas, `4404` canvas deleted, `1001` server shutting down, `1009` message too big. With the `y-websocket` client: `new WebsocketProvider(\"wss://host/v1/canvases\", \"<id>/ws\", doc, {params: {token}})`.",
+        "description": "Upgrade to a WebSocket speaking the standard y-websocket protocol (sync step 1/2 and updates in lib0 v1 encoding, awareness). HTTP/2 extended CONNECT also works. Browsers pass `?token=`. Read-only tokens are refused (`403 read_only_token`). Messages ≤ 8 MiB. Close codes: `4403` removed from the canvas, `4404` canvas deleted, `1001` server shutting down, `1009` message too big. With the `y-websocket` client: `new WebsocketProvider(\"wss://host/v1/canvases\", \"<id>/ws\", doc, {params: {token}})`.",
         "responses": {
           "101": { "description": "Switching protocols." },
           "400": { "$ref": "#/components/responses/BadRequest" },

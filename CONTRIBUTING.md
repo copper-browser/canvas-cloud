@@ -33,9 +33,8 @@ Then point the tests at them. Each suite reads its own variable:
 | `CANVAS_CLOUD_TEST_MCP_DATABASE_URL` | `cvc_mcp_test` | `crates/mcp` |
 | `CANVAS_CLOUD_TEST_DATABASE_URL` | `cvc_bin_test` | `crates/canvas-cloud` |
 
-The defaults in the test files point at one developer's local setup (a fixed user and port
-5433), so set all seven. For a local PostgreSQL on the default port that lets your user
-connect over TCP to `localhost`:
+Each defaults to `postgres://localhost:5432/<database>` (what CI uses). If your PostgreSQL
+listens elsewhere or needs another user, set all seven, for example:
 
 ```sh
 for v in CORE:cvc_core_test ENGINE:cvc_engine_test APPS:cvc_apps_test \

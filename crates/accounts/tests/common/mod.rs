@@ -1,6 +1,6 @@
 //! Shared integration-test harness for the accounts crate: real native Postgres
 //! (`CANVAS_CLOUD_TEST_ACCOUNTS_DATABASE_URL`, default
-//! `postgres://farce@localhost:5433/cvc_accounts_test`), the real core app with the engine and
+//! `postgres://localhost:5432/cvc_accounts_test`), the real core app with the engine and
 //! accounts routers on an ephemeral port, a reqwest client (no redirects), an SSE frame
 //! reader and an in-process mock OIDC provider ([`idp`]).
 
@@ -25,7 +25,7 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-pub const DATABASE_URL: &str = "postgres://farce@localhost:5433/cvc_accounts_test";
+pub const DATABASE_URL: &str = "postgres://localhost:5432/cvc_accounts_test";
 
 pub fn database_url() -> String {
     std::env::var("CANVAS_CLOUD_TEST_ACCOUNTS_DATABASE_URL")
@@ -113,7 +113,7 @@ impl TestApp {
             .await
             .expect(
                 "connecting to the accounts test database \
-                 (createdb -w -h localhost -p 5433 cvc_accounts_test)",
+                 (createdb -w -h localhost cvc_accounts_test)",
             );
         migrate(&pool, reset).await;
         let state = AppState::new(pool, cfg);
