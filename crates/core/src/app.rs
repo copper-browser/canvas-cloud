@@ -20,6 +20,7 @@ use tower::ServiceExt as _;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::services::ServeDir;
 
+use crate::config::Config;
 use crate::error::ApiError;
 use crate::state::SharedState;
 
@@ -192,22 +193,40 @@ pub async fn serve_web_root(dir: ServeDir, req: Request) -> Response {
     res
 }
 
-/// `GET /v1/info` — public. Clients (and a web app probing its own origin) learn what this
-/// server is and offers.
-async fn info(state: SharedState, extras: Arc<InfoExtras>) -> Result<Json<Value>, ApiError> {
-    let signup = crate::identity::signup_allowed(&state.db).await?;
-    let oidc: Vec<Value> = state
-        .cfg
-        .oidc
+/// The sign-in buttons a client offers, as `GET /v1/info` → `auth.oidc` and
+/// `GET /v1/auth/oidc` → `providers` list them: every `[[oidc]]` provider
+/// (`kind: "oidc"`), then every `[[delegated_sign_in]]` one (`kind: "delegated"`, plus its
+/// `start_url`). `start` is always this server's `/v1/auth/oidc/{id}/start`; the client adds
+/// `?redirect_uri=` and gets the result back in the fragment either way.
+pub fn sign_in_providers(cfg: &Config) -> Vec<Value> {
+    let start = |id: &str| format!("/v1/auth/oidc/{id}/start");
+    cfg.oidc
         .iter()
         .map(|p| {
             json!({
                 "id": p.id,
                 "name": p.label(),
-                "start": format!("/v1/auth/oidc/{}/start", p.id),
+                "start": start(&p.id),
+                "kind": "oidc",
             })
         })
-        .collect();
+        .chain(cfg.delegated_sign_in.iter().map(|d| {
+            json!({
+                "id": d.id,
+                "name": d.label(),
+                "start": start(&d.id),
+                "kind": "delegated",
+                "start_url": d.start_url,
+            })
+        }))
+        .collect()
+}
+
+/// `GET /v1/info` — public. Clients (and a web app probing its own origin) learn what this
+/// server is and offers.
+async fn info(state: SharedState, extras: Arc<InfoExtras>) -> Result<Json<Value>, ApiError> {
+    let signup = crate::identity::signup_allowed(&state.db).await?;
+    let oidc = sign_in_providers(&state.cfg);
     let mut limits = Map::new();
     limits.insert(
         "auth_per_minute".into(),
@@ -220,6 +239,10 @@ async fn info(state: SharedState, extras: Arc<InfoExtras>) -> Result<Json<Value>
     limits.insert(
         "import_max_line_bytes".into(),
         state.cfg.limits.import_max_line_bytes.into(),
+    );
+    limits.insert(
+        "app_sessions_per_minute".into(),
+        state.cfg.limits.app_sessions_per_minute.into(),
     );
     for (k, v) in &extras.limits {
         limits.insert(k.clone(), v.clone());

@@ -107,20 +107,34 @@ pub async fn create_session<'e, E>(
 where
     E: sqlx::PgExecutor<'e>,
 {
+    Ok(create_session_with_expiry(db, user_id, user_agent).await?.0)
+}
+
+/// [`create_session`], also returning when the session expires unless it is used
+/// ([`SESSION_TTL_DAYS`] from now; every use slides it).
+pub async fn create_session_with_expiry<'e, E>(
+    db: E,
+    user_id: Uuid,
+    user_agent: Option<&str>,
+) -> ApiResult<(String, OffsetDateTime)>
+where
+    E: sqlx::PgExecutor<'e>,
+{
     let (token, digest) = mint(CredentialKind::Session);
     let user_agent = user_agent.and_then(|ua| super::clean_name(Some(ua), MAX_USER_AGENT_CHARS));
-    sqlx::query(
+    let expires_at: OffsetDateTime = sqlx::query_scalar(
         "INSERT INTO sessions (id, user_id, token_sha256, user_agent, expires_at)
-         VALUES ($1, $2, $3, $4, now() + make_interval(days => $5))",
+         VALUES ($1, $2, $3, $4, now() + make_interval(days => $5))
+         RETURNING expires_at",
     )
     .bind(ids::uuid_v7())
     .bind(user_id)
     .bind(&digest[..])
     .bind(user_agent)
     .bind(SESSION_TTL_DAYS)
-    .execute(db)
+    .fetch_one(db)
     .await?;
-    Ok(token)
+    Ok((token, expires_at))
 }
 
 /// End one session (logout). Returns whether it existed.

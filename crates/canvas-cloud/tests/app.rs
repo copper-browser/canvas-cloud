@@ -384,3 +384,113 @@ fn admin_cli_manages_users_settings_and_apps() {
     assert!(cli(&config, &["admin", "users", "disable", "--email", &email]).is_err());
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// Delegated sign-in end to end through the composed app: the provider is listed, `start`
+/// hands the browser to the delegate, the delegate (a `trust_email` linked app) provisions the
+/// person and mints their session, and that token is an ordinary session.
+#[tokio::test]
+async fn delegated_sign_in_end_to_end() {
+    let toml = format!(
+        "listen = \"127.0.0.1:0\"\npublic_url = \"https://canvas.example.test\"\n\
+         database_url = \"{}\"\nmaster_key = \"{}\"\n[tls]\nmode = \"off\"\n\
+         [[delegated_sign_in]]\nid = \"portal\"\nname = \"Team portal\"\n\
+         start_url = \"https://portal.example.test/canvas-signin\"\n",
+        database_url(),
+        canvas_cloud_core::ids::b64url(&[3u8; 32]),
+    );
+    let cfg = Config::from_toml_str(&toml, &|_| None).unwrap();
+    let base = state_with(|_| {}).await;
+    let st = AppState::new(base.db.clone(), cfg);
+    let app = canvas_cloud::app(st.clone());
+
+    let (s, v) = call(&app, Method::GET, "/v1/info", None).await;
+    assert_eq!(s, StatusCode::OK);
+    let portal = json!({
+        "id": "portal",
+        "name": "Team portal",
+        "start": "/v1/auth/oidc/portal/start",
+        "kind": "delegated",
+        "start_url": "https://portal.example.test/canvas-signin",
+    });
+    assert_eq!(v["auth"]["oidc"], json!([portal]));
+    assert!(v["features"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("app_sessions")));
+    let (_, v) = call(&app, Method::GET, "/v1/auth/oidc", None).await;
+    assert_eq!(v["providers"], json!([portal]));
+
+    // The browser goes to start and on to the delegate, carrying where to come back to
+    // (`https://canvas.example.test/account`).
+    let (s, h, _) = raw(
+        &app,
+        Method::GET,
+        "/v1/auth/oidc/portal/start?redirect_uri=https%3A%2F%2Fcanvas.example.test%2Faccount",
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::FOUND);
+    assert_eq!(
+        h[header::LOCATION],
+        "https://portal.example.test/canvas-signin?redirect_uri=https%3A%2F%2Fcanvas.example.test%2Faccount"
+    );
+
+    // The delegate signs the person in and mints their session as its linked app.
+    let (app_id, key) = identity::create_app(&st.db, "portal", false, true)
+        .await
+        .unwrap();
+    let email = format!("dsi-{}@example.test", Uuid::now_v7().simple());
+    let send = |method: Method, path: String, body: Value| {
+        let app = app.clone();
+        let key = key.clone();
+        async move {
+            let req = Request::builder()
+                .method(method)
+                .uri(path)
+                .header("authorization", format!("Bearer {key}"))
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            let status = resp.status();
+            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+            (status, serde_json::from_slice::<Value>(&bytes).unwrap())
+        }
+    };
+    let (s, user) = send(
+        Method::PUT,
+        format!("/v1/apps/self/users/{email}"),
+        json!({ "email": email, "display_name": "Dee" }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{user}");
+    let (s, minted) = send(
+        Method::POST,
+        format!("/v1/apps/self/users/{email}/sessions"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "{minted}");
+    assert_eq!(minted["user_id"], user["user_id"]);
+    let token = minted["token"].as_str().unwrap();
+    // …and sends the browser to `https://canvas.example.test/account#token=…`; the client
+    // signs in with it.
+    let (s, me) = call(&app, Method::GET, "/v1/auth/me", Some(token)).await;
+    assert_eq!(s, StatusCode::OK, "{me}");
+    assert_eq!(me["via"], json!({ "kind": "session" }));
+    assert_eq!(me["user"]["id"], user["user_id"]);
+    assert_eq!(me["user"]["email"], email);
+    assert_eq!(me["user"]["display_name"], "Dee");
+    let (s, v) = call(&app, Method::POST, "/v1/auth/logout", Some(token)).await;
+    assert_eq!((s, &v["revoked"]), (StatusCode::OK, &json!(1)), "{v}");
+    let (s, _) = call(&app, Method::GET, "/v1/auth/me", Some(token)).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    let audits: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM admin_audit WHERE actor = $1 AND action = 'app.user.session'",
+    )
+    .bind(format!("app:{app_id}"))
+    .fetch_one(&st.db)
+    .await
+    .unwrap();
+    assert_eq!(audits, 1);
+}

@@ -566,6 +566,7 @@ dependencies = [
  "canvas-cloud-core",
  "canvas-cloud-engine",
  "futures",
+ "governor",
  "hex",
  "http-body-util",
  "metrics",

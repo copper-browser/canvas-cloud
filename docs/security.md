@@ -95,7 +95,11 @@ at start with the database password and master key redacted.
   need a credential.
 - **OIDC redirects** go only to `redirect_uri`s listed for the provider or with
   `public_url`'s origin; the result travels in the URL fragment, which is not sent to servers
-  or in `Referer`.
+  or in `Referer`. A [delegated sign-in](auth.md#delegated-sign-in) `start` accepts only
+  `public_url`'s origin, and the delegate must apply the same rule before it appends a token.
+- **Sessions minted by linked apps** (`POST /v1/apps/self/users/{subject}/sessions`) need
+  an app with `trust_email` (which already vouches for its users' email addresses), are
+  limited per app, audited, and answered with `Cache-Control: no-store`.
 
 ## Rate limits
 
