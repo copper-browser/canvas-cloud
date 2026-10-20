@@ -1343,6 +1343,10 @@ pub(crate) async fn apply_ops_at(
     if let Some(p) = near {
         ctx.origin = p;
     }
+    // Checklist assignees resolve against the canvas's members by name, email or id.
+    if ops.iter().any(names_assignees) {
+        ctx.people = canvas_people(state, a.canvas_id).await?;
+    }
 
     let room = rooms().get(a.canvas_id);
     let (result, wrote) = room
@@ -1377,6 +1381,38 @@ pub(crate) async fn apply_ops_at(
         "canvas ops applied"
     );
     Ok(result)
+}
+
+/// Whether an op assigns anyone (`assignees` in its shape or patch).
+fn names_assignees(op: &Value) -> bool {
+    ["shape", "patch", "props"]
+        .iter()
+        .filter_map(|k| op.get(*k))
+        .any(|o| o.get("assignees").is_some())
+}
+
+/// The canvas's members as checklist assignees resolve against them.
+async fn canvas_people(
+    state: &AppState,
+    canvas_id: Uuid,
+) -> Result<Vec<crate::checklist::Person>, ApiError> {
+    let rows: Vec<(Uuid, String, String)> = sqlx::query_as(
+        "SELECT u.id, u.display_name, u.email FROM canvas_members m
+         JOIN users u ON u.id = m.user_id
+         WHERE m.canvas_id = $1 AND NOT u.disabled
+         ORDER BY (m.role = 'owner') DESC, m.added_at, m.user_id",
+    )
+    .bind(canvas_id)
+    .fetch_all(&state.db)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, name, email)| crate::checklist::Person {
+            id: id.to_string(),
+            name,
+            email: (!email.is_empty()).then_some(email),
+        })
+        .collect())
 }
 
 /// After [`WRITING_MS`], flips the agent back to `idle` unless it wrote again since.

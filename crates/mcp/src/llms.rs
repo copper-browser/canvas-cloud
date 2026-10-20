@@ -67,11 +67,12 @@ More: `GET /v1/canvases/{id}/members`, `POST /v1/canvases/{id}/invites {"email"}
 - `{"op":"delete","id":"goal"}` — attached arrows go too
 - `{"op":"connect","from":"goal","to":"risk","label":"blocked by"}` — an arrow between two shapes
 - `{"op":"clear"}` — deletes every shape; only with `confirm: true`, only when asked
+- `{"op":"comment","on":"goal","text":"Still the plan?"}` — starts a comment thread (its id in `ids`); `{"op":"reply","thread":"<id>","text":"…"}` (reopens a resolved one); `{"op":"resolve","thread":"<id>","resolved":true}`
 
-Shape types: `sticky` (text, markdown), `text` (text, fontSize, align), `frame` (title; groups what lies inside it), `arrow` (from, to, label), `image` (src: https or `data:image/…` ≤ 2 MiB, naturalW, naturalH), `link` (url, title), `checklist` (title, columns 1-4, rows ≤ 60, picks `{"<row>": "<column>"}`). Every shape: `x`, `y`, `w`, `h`, `color` (yellow, pink, blue, green, purple, gray, white, or `#rrggbb`).
+Shape types: `sticky` (text, markdown), `text` (text, fontSize, align), `frame` (title; groups what lies inside it), `arrow` (from, to, label), `image` (src: https or `data:image/…` ≤ 2 MiB, naturalW, naturalH), `link` (url, title, `live: true` — or type `web` — for a live 960×640 web frame), `checklist` (a card: title, columns 1-4, rows ≤ 60, picks `{"<row>": "<column>"}`, notes `{"<row>": "comment"}`, assignees `{"<row>": ["Ann", "ann@example.com"]}`; stored as a sticky with `view: "checklist"` whose text is a markdown task list), `timeline` (title, start, end `YYYY-MM-DD`, step day|week|month|quarter|year, items `[{date, end?, label, text?, color?}]`; update also takes `addItems` and `editItems: {"<date · label | label | date | index>": patch | null}`). Every shape: `x`, `y`, `w`, `h`, `color` (yellow, pink, blue, green, purple, gray, white, or `#rrggbb`).
 
 Result: `{"applied": n, "ids": [shape id or null per op], "errors": [{"index", "op", "error"}]}`.
-Read (`GET /v1/canvases/{id}/read`, MCP `read_canvas`): `{canvas, shapes: [{id, type, x, y, w, h, color, z, by, text|title|label, …, frame}], agents, count, chat}`; text is cut to 500 characters unless `full=true`; `ids=a,b` / `types=sticky,frame` narrow the shapes.
+Read (`GET /v1/canvases/{id}/read`, MCP `read_canvas`): `{canvas, shapes: [{id, type, x, y, w, h, color, z, by, text|title|label, …, frame}], comments, agents, count, chat}` (checklist cards and timelines carry `view` and their rows/items; `types=checklist,timeline,web` match them); text is cut to 500 characters unless `full=true`; `ids=a,b` / `types=sticky,frame` narrow the shapes.
 
 ## Live rooms (WebSocket)
 

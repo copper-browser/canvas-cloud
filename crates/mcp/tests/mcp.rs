@@ -824,6 +824,110 @@ async fn oversized_reads_come_back_as_a_summary() {
     assert_eq!(one["shapes"][0]["text"].as_str().unwrap().len(), text.len());
 }
 
+/// The 0.2.0 vocabulary through MCP: checklist cards, timelines, live links and comment
+/// threads, and how `read_canvas` shows them.
+#[tokio::test]
+async fn rich_shapes_and_comments() {
+    let app = TestApp::new().await;
+    let ann = app.user("ann").await;
+    let pat = app.pat(&ann, Scope::Write).await;
+    let mut mcp = app.mcp(&pat);
+    let r = mcp
+        .ok(
+            "apply_ops",
+            json!({ "canvas": "personal", "as": { "name": "Planner" }, "ops": [
+                { "op": "add", "shape": { "type": "checklist", "id": "c", "x": 0, "y": 0, "title": "Fix list",
+                    "columns": ["Done"], "rows": ["Fix login", "Ship"], "picks": { "Ship": true },
+                    "notes": { "Fix login": "needs a test" }, "assignees": { "Fix login": ["ann"] } } },
+                { "op": "add", "shape": { "type": "timeline", "id": "t", "x": 0, "y": 400, "title": "Q4",
+                    "start": "2026-10-01", "end": "2026-12-31",
+                    "items": [{ "date": "2026-10-14", "label": "Kickoff" }, { "date": "2026-11-01", "end": "2026-11-20", "label": "Build" }] } },
+                { "op": "add", "shape": { "type": "web", "id": "w", "x": 1000, "y": 0, "url": "https://example.com" } },
+                { "op": "comment", "on": "c", "text": "Who owns this?" },
+            ] }),
+        )
+        .await;
+    assert_eq!(r["applied"], 4, "{r}");
+    let thread = r["ids"][3].as_str().unwrap().to_owned();
+    let r = mcp
+        .ok(
+            "apply_ops",
+            json!({ "canvas": "personal", "ops": [
+                { "op": "reply", "thread": thread, "text": "Ann does" },
+                { "op": "resolve", "thread": thread },
+                { "op": "update", "id": "t", "patch": { "addItems": [{ "date": "2026-12-15", "label": "GA" }],
+                    "editItems": { "Kickoff": { "text": "all hands" } } } },
+            ] }),
+        )
+        .await;
+    assert_eq!(r["applied"], 3, "{r}");
+    assert_eq!(r["ids"][0], thread.as_str());
+
+    let read = mcp.ok("read_canvas", json!({ "canvas": "personal" })).await;
+    let shape = |id: &str| {
+        read["shapes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == id)
+            .cloned()
+            .unwrap()
+    };
+    let c = shape("c");
+    assert_eq!(
+        (c["type"].clone(), c["view"].clone()),
+        (json!("sticky"), json!("checklist"))
+    );
+    assert_eq!(c["title"], "Fix list");
+    assert_eq!(c["tally"], json!({ "Done": 1 }));
+    assert_eq!(c["rows"][0]["note"], "needs a test");
+    assert_eq!(c["rows"][0]["assignees"][0]["id"], ann.id.to_string());
+    let t = shape("t");
+    assert_eq!(t["view"], "timeline");
+    assert_eq!(
+        (t["start"].clone(), t["step"].clone()),
+        (json!("2026-10-01"), json!("week"))
+    );
+    let kinds: Vec<&str> = t["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["bubble", "section", "note"]);
+    let w = shape("w");
+    assert_eq!(
+        (w["type"].clone(), w["live"].clone(), w["w"].clone()),
+        (json!("link"), json!(true), json!(960))
+    );
+    let comments = read["comments"].as_array().unwrap();
+    assert_eq!(comments.len(), 1);
+    assert_eq!(comments[0]["anchor"], "c");
+    assert_eq!(comments[0]["resolved"], true);
+    let by: Vec<&str> = comments[0]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["by"].as_str().unwrap())
+        .collect();
+    assert_eq!(by, ["Planner", "ann"]);
+    // `types` matches the kind too.
+    let only = mcp
+        .ok(
+            "read_canvas",
+            json!({ "canvas": "personal", "types": ["timeline", "web"] }),
+        )
+        .await;
+    let ids: Vec<&str> = only["shapes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["w", "t"]);
+    assert_eq!(only["comments"], json!([]));
+}
+
 #[tokio::test]
 async fn llms_txt_and_openapi_are_public_and_point_at_this_server() {
     let app = TestApp::with(|cfg| cfg.public_url = "https://canvas.example.test".into()).await;

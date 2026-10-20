@@ -5,11 +5,14 @@ use serde::Serialize;
 use serde_json::Value;
 use yrs::{Doc, Map as _, ReadTxn, Transact as _};
 
-use crate::checklist::{row_summaries, ser_tally, tally, RowSummary};
+use crate::checklist::{note_row_summaries, row_summaries, ser_tally, tally, RowSummary};
+use crate::comments::{all_threads, summarize_thread, CommentSummary};
 use crate::geometry::{contains_box, js_round};
 use crate::ops::read_agent;
 use crate::schema::{jnum, js_len, js_slice, out_to_json, ser_num, ser_opt_num, ShapeType, AGENTS};
-use crate::shape::{arrow_bbox, box_lookup, doc_shapes, Endpoint, Shape};
+use crate::shape::{arrow_bbox, box_lookup, doc_shapes, Endpoint, Shape, View};
+use crate::timeline::{summarize_items, timeline_of};
+use crate::timeline_text::today_iso;
 
 /// Text, titles and labels are cut to this many characters unless `full`.
 pub const READ_TEXT_LIMIT: usize = 500;
@@ -63,6 +66,9 @@ pub struct ShapeSummary {
     pub font_size: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub align: Option<String>,
+    /// A sticky shown as a checklist card or a timeline (its text is the list).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub view: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -90,6 +96,18 @@ pub struct ShapeSummary {
     pub natural_h: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// A link shown live (the site in a frame) rather than as a card.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub live: Option<bool>,
+    /// A timeline's range (`YYYY-MM-DD`), step and items in date order.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub items: Option<Vec<Value>>,
     /// A checklist's columns.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub columns: Option<Vec<String>>,
@@ -125,6 +143,8 @@ pub struct ReadResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub viewport: Option<Value>,
     pub shapes: Vec<ShapeSummary>,
+    /// Comment threads, oldest first; with `ids`/`types`, only those on the shapes returned.
+    pub comments: Vec<CommentSummary>,
     pub agents: Vec<AgentSummary>,
     /// The server has no selection; always empty.
     pub selection: Vec<String>,
@@ -174,6 +194,22 @@ pub fn describe_src(src: &str, full: bool) -> String {
     format!("data:{kind} ({size})")
 }
 
+/// The kind a `types` filter also matches: a note's view, or `web` for a live link.
+pub fn kind_of(s: &Shape) -> &'static str {
+    match s.view {
+        Some(v) => v.as_str(),
+        None if s.kind == ShapeType::Link && s.live => "web",
+        None => s.kind.as_str(),
+    }
+}
+
+/// `types` matches the stored type (a checklist card is still a sticky) or the kind.
+pub fn type_matches(types: &[String], s: &Shape) -> bool {
+    types
+        .iter()
+        .any(|t| t == s.kind.as_str() || t == kind_of(s))
+}
+
 /// Reads every shape and agent from `doc` (text cut to 500 characters unless `full`).
 pub fn read_shapes(doc: &Doc, full: bool) -> ReadResult {
     let txn = doc.transact();
@@ -186,7 +222,8 @@ pub fn read_shapes(doc: &Doc, full: bool) -> ReadResult {
     )
 }
 
-fn summarize(s: &Shape, all: &[Shape], frames: &[&Shape], full: bool) -> ShapeSummary {
+#[allow(clippy::too_many_lines)]
+fn summarize(s: &Shape, all: &[Shape], frames: &[&Shape], full: bool, today: &str) -> ShapeSummary {
     let bx = if s.is_arrow() {
         arrow_bbox(s, &box_lookup(all))
     } else {
@@ -205,6 +242,7 @@ fn summarize(s: &Shape, all: &[Shape], frames: &[&Shape], full: bool) -> ShapeSu
         text: None,
         font_size: None,
         align: None,
+        view: None,
         title: None,
         image: None,
         label: None,
@@ -214,6 +252,11 @@ fn summarize(s: &Shape, all: &[Shape], frames: &[&Shape], full: bool) -> ShapeSu
         natural_w: None,
         natural_h: None,
         url: None,
+        live: None,
+        start: None,
+        end: None,
+        step: None,
+        items: None,
         columns: None,
         rows: None,
         tally: None,
@@ -224,6 +267,29 @@ fn summarize(s: &Shape, all: &[Shape], frames: &[&Shape], full: bool) -> ShapeSu
             sum.text = Some(clip(&s.text, full));
             sum.font_size = s.font_size;
             sum.align.clone_from(&s.align);
+            let cut = |t: &str| clip(t, full);
+            match s.view {
+                Some(View::Checklist) => {
+                    sum.view = Some(View::Checklist.as_str().into());
+                    sum.title = Some(clip(&s.title, full));
+                    let c = s.checklist.clone().unwrap_or_default();
+                    sum.tally = Some(tally(&c));
+                    sum.rows = Some(note_row_summaries(&c, &cut));
+                    sum.columns = Some(c.columns);
+                }
+                Some(View::Timeline) => {
+                    if let Some(p) = &s.timeline {
+                        let t = timeline_of(p, today);
+                        sum.view = Some(View::Timeline.as_str().into());
+                        sum.title = Some(clip(&s.title, full));
+                        sum.start = Some(t.start);
+                        sum.end = Some(t.end);
+                        sum.step = Some(t.step.as_str().into());
+                        sum.items = Some(summarize_items(&t.items, &cut));
+                    }
+                }
+                None => {}
+            }
         }
         ShapeType::Frame => {
             sum.title = Some(clip(&s.title, full));
@@ -246,12 +312,13 @@ fn summarize(s: &Shape, all: &[Shape], frames: &[&Shape], full: bool) -> ShapeSu
         ShapeType::Link => {
             sum.url = Some(s.url.clone());
             sum.title = Some(clip(&s.title, full));
+            sum.live = s.live.then_some(true);
         }
         ShapeType::Checklist => {
             sum.title = Some(clip(&s.title, full));
             let c = s.checklist.clone().unwrap_or_default();
             sum.tally = Some(tally(&c));
-            sum.rows = Some(row_summaries(&c));
+            sum.rows = Some(row_summaries(&c, &|t: &str| clip(t, full)));
             sum.columns = Some(c.columns);
         }
     }
@@ -276,15 +343,17 @@ fn summarize(s: &Shape, all: &[Shape], frames: &[&Shape], full: bool) -> ShapeSu
 pub fn read_canvas_txn<T: ReadTxn>(txn: &T, opts: &ReadOpts) -> ReadResult {
     let all = doc_shapes(txn);
     let frames: Vec<&Shape> = all.iter().filter(|s| s.kind == ShapeType::Frame).collect();
+    let now_ms = if opts.now_ms > 0 {
+        opts.now_ms
+    } else {
+        crate::schema::now_ms()
+    };
+    let today = today_iso(now_ms);
     let mut shapes: Vec<ShapeSummary> = all
         .iter()
         .filter(|s| opts.ids.as_ref().is_none_or(|ids| ids.contains(&s.id)))
-        .filter(|s| {
-            opts.types
-                .as_ref()
-                .is_none_or(|t| t.iter().any(|k| k == s.kind.as_str()))
-        })
-        .map(|s| summarize(s, &all, &frames, opts.full))
+        .filter(|s| opts.types.as_ref().is_none_or(|t| type_matches(t, s)))
+        .map(|s| summarize(s, &all, &frames, opts.full, &today))
         .collect();
     shapes.sort_by(|a, b| {
         a.y.total_cmp(&b.y)
@@ -292,11 +361,17 @@ pub fn read_canvas_txn<T: ReadTxn>(txn: &T, opts: &ReadOpts) -> ReadResult {
             .then_with(|| a.id.cmp(&b.id))
     });
 
-    let now = if opts.now_ms > 0 {
-        opts.now_ms as f64
-    } else {
-        crate::schema::now_ms() as f64
-    };
+    let filtered = opts.ids.is_some() || opts.types.is_some();
+    let mut comments: Vec<CommentSummary> = Vec::new();
+    for t in all_threads(txn) {
+        if !t.is_shown() || (filtered && !shapes.iter().any(|s| s.id == t.anchor)) {
+            continue;
+        }
+        let exists = all.iter().any(|s| s.id == t.anchor);
+        comments.push(summarize_thread(&t, exists, &|x: &str| clip(x, opts.full)));
+    }
+
+    let now = now_ms as f64;
     let mut agents: Vec<AgentSummary> = Vec::new();
     if let Some(map) = txn.get_map(AGENTS) {
         for (id, value) in map.iter(txn) {
@@ -330,6 +405,7 @@ pub fn read_canvas_txn<T: ReadTxn>(txn: &T, opts: &ReadOpts) -> ReadResult {
         canvas: None,
         viewport: None,
         shapes,
+        comments,
         agents,
         selection: Vec::new(),
         count: all.len(),
@@ -354,6 +430,7 @@ mod tests {
 
     fn ctx() -> OpsCtx {
         OpsCtx {
+            people: Vec::new(),
             by: "Ann".into(),
             by_id: "u-ann".into(),
             now_ms: 7,

@@ -965,7 +965,7 @@
               "app_url": { "type": ["string", "null"], "description": "Share-link web target (`{token}` substituted)." }
             }
           },
-          "features": { "type": "array", "items": { "type": "string" }, "description": "e.g. canvases, mentions, share_links, people, accounts, access_tokens, events, oidc, apps, import, mcp." },
+          "features": { "type": "array", "items": { "type": "string" }, "description": "e.g. canvases, mentions, share_links, people, ops_v2 (checklist cards, timelines, live links and comment ops), accounts, access_tokens, events, oidc, apps, import, mcp." },
           "limits": { "type": "object", "additionalProperties": true, "properties": { "auth_per_minute": { "type": "integer" }, "import_max_bytes": { "type": "integer" }, "import_max_line_bytes": { "type": "integer" } } }
         }
       },
@@ -1083,6 +1083,8 @@
           "type": { "type": "string", "enum": ["sticky", "text", "frame", "arrow", "image", "link", "checklist"] },
           "x": { "type": "number" }, "y": { "type": "number" }, "w": { "type": "number" }, "h": { "type": "number" },
           "color": { "type": "string" },
+          "view": { "type": "string", "enum": ["checklist", "timeline"], "description": "A sticky shown as a checklist card or a timeline (its text is the list)." },
+          "live": { "type": "boolean", "description": "A link shown live (the site itself in a frame)." },
           "z": { "type": "number" },
           "by": { "type": "string", "description": "Who created it (an agent name or a user)." },
           "text": { "type": "string" },
@@ -1097,8 +1099,12 @@
           "naturalW": { "type": "number" }, "naturalH": { "type": "number" },
           "url": { "type": "string" },
           "columns": { "type": "array", "items": { "type": "string" } },
-          "rows": { "type": "array", "items": { "type": "object", "required": ["id", "label", "pick"], "properties": { "id": { "type": "string" }, "label": { "type": "string" }, "pick": { "type": ["string", "null"] }, "by": { "type": "string" }, "at": {} } } },
+          "rows": { "type": "array", "items": { "type": "object", "required": ["label", "pick"], "description": "`id` only on a checklist of the older type.", "properties": { "id": { "type": "string" }, "label": { "type": "string" }, "pick": { "type": ["string", "null"] }, "by": { "type": "string" }, "at": {}, "note": { "type": "string", "description": "The row's comment." }, "noteBy": { "type": "string" }, "noteAt": {}, "assignees": { "type": "array", "items": { "type": "object", "required": ["name"], "properties": { "name": { "type": "string" }, "id": { "type": "string" }, "email": { "type": "string" } } } } } } },
           "tally": { "type": "object", "additionalProperties": { "type": "integer" }, "description": "Picks per column, in column order." },
+          "start": { "type": "string", "description": "A timeline's first day (YYYY-MM-DD)." },
+          "end": { "type": "string" },
+          "step": { "type": "string", "enum": ["day", "week", "month", "quarter", "year"] },
+          "items": { "type": "array", "items": { "type": "object", "required": ["date", "label", "kind"], "properties": { "date": { "type": "string" }, "end": { "type": "string" }, "label": { "type": "string" }, "text": { "type": "string" }, "color": { "type": "string" }, "kind": { "type": "string", "enum": ["note", "bubble", "section"] } } } },
           "frame": { "type": "string", "description": "The innermost frame this shape sits in." }
         }
       },
@@ -1132,7 +1138,20 @@
           "agents": { "type": "array", "items": { "$ref": "#/components/schemas/Agent" }, "description": "Agents written to in the last 2 minutes." },
           "selection": { "type": "array", "items": { "type": "string" }, "description": "Always empty on the server." },
           "count": { "type": "integer", "description": "Every readable shape (before `ids`/`types`)." },
-          "chat": { "type": "array", "items": { "$ref": "#/components/schemas/ChatMessage" }, "description": "The last 50 messages, oldest first." }
+          "chat": { "type": "array", "items": { "$ref": "#/components/schemas/ChatMessage" }, "description": "The last 50 messages, oldest first." },
+          "comments": { "type": "array", "items": { "$ref": "#/components/schemas/CommentThread" }, "description": "Comment threads on shapes, oldest first; with `ids`/`types`, only those on the shapes returned." }
+        }
+      },
+      "CommentThread": {
+        "type": "object",
+        "required": ["id", "anchor", "resolved", "messages"],
+        "properties": {
+          "id": { "type": "string" },
+          "anchor": { "type": "string", "description": "The shape it is on." },
+          "anchorDeleted": { "type": "boolean" },
+          "resolved": { "type": "boolean" },
+          "resolvedBy": { "type": "object", "properties": { "id": { "type": "string" }, "name": { "type": "string" }, "at": { "type": "number" } } },
+          "messages": { "type": "array", "items": { "type": "object", "required": ["id", "by", "at", "text"], "properties": { "id": { "type": "string" }, "by": { "type": "string" }, "at": { "type": "number" }, "text": { "type": "string" }, "edited": { "type": "boolean" } } } }
         }
       },
       "ShapeInput": {
@@ -1140,7 +1159,7 @@
         "required": ["type"],
         "description": "A shape to add. Omit `x` and `y` to auto-place it in free space near the request's `near`.",
         "properties": {
-          "type": { "type": "string", "enum": ["sticky", "text", "frame", "arrow", "image", "link", "checklist"] },
+          "type": { "type": "string", "enum": ["sticky", "text", "frame", "arrow", "image", "link", "checklist", "timeline", "web"], "description": "`checklist` makes the checklist card (a sticky with `view: \"checklist\"`), `timeline` a sticky with `view: \"timeline\"`, `web` a link with `live: true`." },
           "id": { "type": "string", "pattern": "^[A-Za-z0-9_\\-:.]{1,64}$" },
           "x": { "type": "number" }, "y": { "type": "number" }, "w": { "type": "number" }, "h": { "type": "number" },
           "color": { "$ref": "#/components/schemas/Color" },
@@ -1157,9 +1176,21 @@
           "url": { "type": "string", "description": "http, https, mailto (plus any configured extra schemes); bare hosts get https://." },
           "columns": { "type": "array", "minItems": 1, "maxItems": 4, "items": { "type": "string" } },
           "rows": { "type": "array", "maxItems": 60, "items": { "oneOf": [{ "type": "string" }, { "type": "object", "required": ["label"], "properties": { "label": { "type": "string" }, "id": { "type": "string" } } }] } },
-          "picks": { "type": "object", "additionalProperties": { "type": ["string", "boolean", "null"] } }
+          "picks": { "type": "object", "additionalProperties": { "type": ["string", "boolean", "null"] } },
+          "notes": { "type": "object", "additionalProperties": { "type": ["string", "null"] }, "description": "A row's comment, by row label." },
+          "assignees": { "type": "object", "additionalProperties": { "type": ["array", "null"], "maxItems": 12, "items": { "oneOf": [{ "type": "string" }, { "type": "object", "properties": { "name": { "type": "string" }, "email": { "type": "string" }, "id": { "type": "string" } } }] } }, "description": "Who a row is assigned to: canvas members by name, email or id, anyone else by name." },
+          "view": { "type": ["string", "null"], "enum": ["checklist", "timeline", null] },
+          "live": { "type": "boolean" },
+          "start": { "type": "string" }, "end": { "type": "string" },
+          "step": { "type": "string", "enum": ["day", "week", "month", "quarter", "year"] },
+          "items": { "type": "array", "maxItems": 200, "items": { "$ref": "#/components/schemas/TimelineItem" } }
         },
         "additionalProperties": true
+      },
+      "TimelineItem": {
+        "type": "object",
+        "required": ["date"],
+        "properties": { "date": { "type": "string" }, "end": { "type": "string" }, "label": { "type": "string" }, "text": { "type": "string", "description": "Makes the item a bubble." }, "color": { "type": "string" }, "kind": { "type": "string", "enum": ["note", "bubble"] } }
       },
       "Op": {
         "description": "One edit. Ids may be written `shape:<id>`; later ops can refer to ids added earlier in the same request.",
@@ -1170,7 +1201,10 @@
           { "type": "object", "required": ["op", "id"], "properties": { "op": { "const": "resize" }, "id": { "type": "string" }, "w": { "type": "number" }, "h": { "type": "number" } } },
           { "type": "object", "required": ["op", "id"], "properties": { "op": { "const": "delete" }, "id": { "type": "string" } } },
           { "type": "object", "required": ["op", "from", "to"], "properties": { "op": { "const": "connect" }, "from": { "type": "string" }, "to": { "type": "string" }, "label": { "type": "string" }, "color": { "$ref": "#/components/schemas/Color" }, "fromSide": { "type": "string" }, "toSide": { "type": "string" }, "id": { "type": "string" } } },
-          { "type": "object", "required": ["op"], "properties": { "op": { "const": "clear" } }, "description": "Deletes every shape; refused unless the request has `confirm: true`." }
+          { "type": "object", "required": ["op"], "properties": { "op": { "const": "clear" } }, "description": "Deletes every shape; refused unless the request has `confirm: true`." },
+          { "type": "object", "required": ["op", "on", "text"], "properties": { "op": { "const": "comment" }, "on": { "type": "string" }, "text": { "type": "string", "maxLength": 10000 }, "id": { "type": "string" } }, "description": "Starts a comment thread on a shape; its id is the op's `ids` entry." },
+          { "type": "object", "required": ["op", "thread", "text"], "properties": { "op": { "const": "reply" }, "thread": { "type": "string" }, "text": { "type": "string", "maxLength": 10000 } }, "description": "Adds onto a thread; a resolved thread opens again." },
+          { "type": "object", "required": ["op", "thread"], "properties": { "op": { "const": "resolve" }, "thread": { "type": "string" }, "resolved": { "type": "boolean", "default": true } } }
         ]
       },
       "OpsRequest": {
@@ -1194,7 +1228,7 @@
         "required": ["applied", "ids", "errors"],
         "properties": {
           "applied": { "type": "integer" },
-          "ids": { "type": "array", "items": { "type": ["string", "null"] }, "description": "Per op: the shape id it created or touched; null when it failed, and for clear." },
+          "ids": { "type": "array", "items": { "type": ["string", "null"] }, "description": "Per op: the shape (or comment thread) id it created or touched; null when it failed, and for clear." },
           "errors": { "type": "array", "items": { "type": "object", "required": ["index", "op", "error"], "properties": { "index": { "type": "integer", "description": "Op index; -1 for a problem with the whole request." }, "op": { "type": "string" }, "error": { "type": "string" } } } }
         }
       },

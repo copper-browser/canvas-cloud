@@ -1,8 +1,12 @@
-//! The checklist (RSVP) shape over REST `/ops` + `/read` and the live room: the same
-//! props, validation and limits as the canvas page (`Canvas/src/canvas/checklist.ts`),
-//! and picks on different rows made at the same moment all stick.
+//! The checklist (RSVP) over REST `/ops` + `/read` and the live room: the same props,
+//! validation and limits as the canvas page (`Canvas/src/canvas/checklist.ts`), and picks
+//! on different rows made at the same moment all stick.
+//!
+//! Since 0.2.0 `add {type:"checklist"}` makes the card (a note with `view:"checklist"`
+//! whose text is the list); a checklist of the older type (`type:"checklist"`, rows and
+//! picks as props) still reads and updates in place.
 
-#![allow(clippy::too_many_lines)]
+#![allow(clippy::too_many_lines, clippy::many_single_char_names)]
 
 mod common;
 
@@ -11,7 +15,9 @@ use std::time::Duration;
 use axum::http::StatusCode;
 use common::TestApp;
 use serde_json::{json, Value};
-use yrs::{Any, Map as _, Out, TransactionMut, WriteTxn as _};
+use yrs::{
+    Any, GetString as _, Map as _, MapPrelim, Out, Text as _, TransactionMut, WriteTxn as _,
+};
 
 const T: Duration = Duration::from_secs(5);
 
@@ -58,7 +64,12 @@ async fn ops_and_read_speak_checklist() {
     let (s, read) = app.get(&ann, &format!("{base}/read")).await;
     assert_eq!(s, StatusCode::OK, "{read}");
     let tue = checklist(&read, "tue");
-    assert_eq!(tue["type"], "checklist");
+    assert_eq!(tue["type"], "sticky");
+    assert_eq!(tue["view"], "checklist");
+    assert_eq!(
+        tue["text"],
+        "### Tue · Oct 7\n- [x] Ann · Yes\n- [ ] Bob\n- [ ] Cy"
+    );
     assert_eq!(tue["title"], "Tue · Oct 7");
     assert_eq!(tue["columns"], json!(["Yes", "No"]));
     assert_eq!(tue["color"], "green");
@@ -66,10 +77,7 @@ async fn ops_and_read_speak_checklist() {
     assert_eq!(picks(&tue), [json!("Yes"), Value::Null, Value::Null]);
     assert_eq!(tue["rows"][0]["by"], "Planner");
     assert!(tue["rows"][0]["at"].as_f64().unwrap() > 1.7e12);
-    assert_eq!(
-        tue["rows"][2],
-        json!({ "id": "cy", "label": "Cy", "pick": null })
-    );
+    assert_eq!(tue["rows"][2], json!({ "label": "Cy", "pick": null }));
     assert_eq!(tue["tally"], json!({ "Yes": 1, "No": 0 }));
     assert!(tue.get("picks").is_none(), "{tue}");
     let todo = checklist(&read, "todo");
@@ -78,15 +86,10 @@ async fn ops_and_read_speak_checklist() {
         (json!(280), json!(97))
     );
 
-    // The pick is stored on its own key, attributed to the agent.
+    // Who picked is stored by row label, attributed to the agent.
     let doc = app.state_doc(&ann, &id).await;
     assert_eq!(
-        common::shape_prop(
-            &doc,
-            "tue",
-            &format!("pick:{}", tue["rows"][0]["id"].as_str().unwrap())
-        )
-        .unwrap()["byId"],
+        common::shape_prop(&doc, "tue", "who:ann").unwrap()["byId"],
         "agent:planner"
     );
 
@@ -171,7 +174,7 @@ async fn ops_and_read_speak_checklist() {
     );
     assert_eq!(
         errors[7],
-        "`shape.type` must be sticky, text, frame, arrow, image, link or checklist"
+        "`shape.type` must be sticky, text, frame, arrow, image, link, checklist, timeline or web"
     );
     let (_, read) = app.get(&ann, &format!("{base}/read")).await;
     assert_eq!(read["count"], 2);
@@ -257,15 +260,11 @@ async fn live_peers_picking_different_rows_at_once_both_stick() {
     let b = app.user("grace").await;
     let id = app.canvas(&a, "Live RSVP").await;
     app.share(&a, &id, &b).await;
-    app.post(
-        &a,
-        &format!("/canvases/{id}/ops"),
-        json!({ "ops": [{ "op": "add", "shape": { "id": "c", "type": "checklist",
-            "rows": [{ "label": "Ada", "id": "ada" }, { "label": "Grace", "id": "grace" }] } }] }),
-    )
-    .await;
     let mut pa = app.peer(&a, &id).await;
     let mut pb = app.peer(&b, &id).await;
+    // A checklist of the older type, as an older Copper writes it.
+    pa.edit(|txn| legacy(txn, "c", &[("ada", "Ada"), ("grace", "Grace")]))
+        .await;
     assert!(pa.pump_until(T, |p| p.shape_count() == 1).await);
     assert!(pb.pump_until(T, |p| p.shape_count() == 1).await);
     // Neither has heard the other's click when it makes its own.
@@ -284,8 +283,105 @@ async fn live_peers_picking_different_rows_at_once_both_stick() {
     assert!(pb.pump_until(T, both).await, "B sees both picks");
     let (_, read) = app.get(&a, &format!("/canvases/{id}/read")).await;
     let c = checklist(&read, "c");
+    assert_eq!(c["type"], "checklist", "{c}");
     assert_eq!(picks(&c), [json!("Yes"), json!("No")], "{c}");
     assert_eq!(c["tally"], json!({ "Yes": 1, "No": 1 }));
+    // It still updates in place through ops, notes and assignees included.
+    let (_, r) = app
+        .post(
+            &a,
+            &format!("/canvases/{id}/ops"),
+            json!({ "ops": [{ "op": "update", "id": "c", "patch": { "picks": { "Ada": null },
+                "notes": { "grace": "bringing dessert" }, "assignees": { "Ada": ["grace"] } } }] }),
+        )
+        .await;
+    assert_eq!(r["applied"], 1, "{r}");
+    let (_, read) = app.get(&a, &format!("/canvases/{id}/read")).await;
+    let c = checklist(&read, "c");
+    assert_eq!(c["type"], "checklist", "{c}");
+    assert_eq!(picks(&c), [Value::Null, json!("No")], "{c}");
+    assert_eq!(c["rows"][1]["note"], "bringing dessert");
+    assert_eq!(c["rows"][0]["assignees"][0]["name"], "grace", "{c}");
+    assert_eq!(
+        c["rows"][0]["assignees"][0]["id"],
+        b.id.to_string(),
+        "resolved against the members"
+    );
+    pa.close().await;
+    pb.close().await;
+}
+
+fn legacy(txn: &mut TransactionMut, id: &str, rows: &[(&str, &str)]) {
+    let shapes = txn.get_or_insert_map("shapes");
+    let m = shapes.insert(txn, id, MapPrelim::default());
+    let rows: Vec<Any> = rows
+        .iter()
+        .map(|(id, label)| {
+            Any::from(std::collections::HashMap::from([
+                ("id".to_owned(), Any::from(*id)),
+                ("label".to_owned(), Any::from(*label)),
+            ]))
+        })
+        .collect();
+    let columns: Vec<Any> = vec![Any::from("Yes"), Any::from("No")];
+    m.insert(txn, "id", id);
+    m.insert(txn, "type", "checklist");
+    for (k, v) in [("x", 0), ("y", 0), ("w", 324), ("h", 159), ("z", 1)] {
+        m.insert(txn, k, Any::from(v));
+    }
+    m.insert(txn, "color", "green");
+    m.insert(txn, "title", "RSVP");
+    m.insert(txn, "columns", Any::from(columns));
+    m.insert(txn, "rows", Any::from(rows));
+}
+
+/// Two editors tick different rows of a checklist card at the same moment (each edits
+/// the note's text before hearing the other): both ticks stick, and the read agrees.
+#[tokio::test]
+async fn live_peers_ticking_a_card_at_once_both_stick() {
+    let app = TestApp::new().await;
+    let a = app.user("ada").await;
+    let b = app.user("grace").await;
+    let id = app.canvas(&a, "Live card").await;
+    app.share(&a, &id, &b).await;
+    let (_, r) = app
+        .post(
+            &a,
+            &format!("/canvases/{id}/ops"),
+            json!({ "ops": [{ "op": "add", "shape": { "id": "c", "type": "checklist", "columns": ["Done"],
+                "rows": ["Ada", "Grace"] } }] }),
+        )
+        .await;
+    assert_eq!(r["applied"], 1, "{r}");
+    let mut pa = app.peer(&a, &id).await;
+    let mut pb = app.peer(&b, &id).await;
+    assert!(pa.pump_until(T, |p| p.shape_count() == 1).await);
+    assert!(pb.pump_until(T, |p| p.shape_count() == 1).await);
+    // "- [ ] Ada\n- [ ] Grace": row 0's box at 3, row 1's at 13.
+    let tick = |at: u32| {
+        move |txn: &mut TransactionMut| {
+            let shapes = txn.get_or_insert_map("shapes");
+            let Some(Out::YMap(m)) = shapes.get(txn, "c") else {
+                panic!("no card")
+            };
+            let Some(Out::YText(t)) = m.get(txn, "text") else {
+                panic!("no text")
+            };
+            assert_eq!(t.get_string(txn), "- [ ] Ada\n- [ ] Grace");
+            t.remove_range(txn, at, 1);
+            t.insert(txn, at, "x");
+        }
+    };
+    let (ea, eb) = tokio::join!(pa.edit(tick(3)), pb.edit(tick(13)));
+    let ((), ()) = (ea, eb);
+    let both =
+        |p: &common::Peer| p.shape_prop("c", "text") == Some(json!("- [x] Ada\n- [x] Grace"));
+    assert!(pa.pump_until(T, both).await, "A sees both ticks");
+    assert!(pb.pump_until(T, both).await, "B sees both ticks");
+    let (_, read) = app.get(&a, &format!("/canvases/{id}/read")).await;
+    let c = checklist(&read, "c");
+    assert_eq!(picks(&c), [json!("Done"), json!("Done")], "{c}");
+    assert_eq!(c["tally"], json!({ "Done": 2 }));
     pa.close().await;
     pb.close().await;
 }

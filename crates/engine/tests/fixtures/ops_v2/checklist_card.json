@@ -1,0 +1,664 @@
+{
+ "name": "checklist_card",
+ "now": 1790000000000,
+ "by": "Planner",
+ "byId": "agent:planner",
+ "people": [
+  {
+   "id": "u-grace",
+   "name": "Grace Hopper",
+   "email": "grace@example.com"
+  },
+  {
+   "id": "u-ada",
+   "name": "Ada Lovelace",
+   "email": "ada@example.com"
+  }
+ ],
+ "seed": {},
+ "steps": [
+  {
+   "ops": [
+    {
+     "op": "add",
+     "shape": {
+      "id": "c",
+      "type": "checklist",
+      "x": 0,
+      "y": 0,
+      "title": "Lunch · Fri",
+      "rows": [
+       "Ann",
+       "Bob",
+       {
+        "label": "Cy",
+        "id": "cy"
+       }
+      ],
+      "picks": {
+       "Ann": "Yes",
+       "cy": "no"
+      },
+      "notes": {
+       "Bob": "late\nby 10 min"
+      },
+      "assignees": {
+       "Ann": [
+        "grace"
+       ],
+       "Cy": [
+        "Someone Else",
+        {
+         "email": "ada@example.com"
+        }
+       ]
+      }
+     }
+    },
+    {
+     "op": "add",
+     "shape": {
+      "id": "todo",
+      "type": "checklist",
+      "x": 400,
+      "y": 0,
+      "columns": [
+       "Done"
+      ],
+      "rows": [
+       "Book a table",
+       "Order cake"
+      ],
+      "picks": {
+       "book a table": true
+      }
+     }
+    },
+    {
+     "op": "add",
+     "shape": {
+      "id": "n",
+      "type": "sticky",
+      "view": "checklist",
+      "x": 800,
+      "y": 0,
+      "text": "### Chores\n- [ ] Dishes\n- [x] Bins"
+     }
+    },
+    {
+     "op": "add",
+     "shape": {
+      "id": "plain",
+      "type": "sticky",
+      "x": 1200,
+      "y": 0,
+      "text": "### Packing\n- [ ] Tent\n- [x] Stove\nnot a task"
+     }
+    },
+    {
+     "op": "add",
+     "shape": {
+      "type": "checklist",
+      "rows": [
+       "A"
+      ],
+      "picks": {
+       "A": "Maybe"
+      }
+     }
+    },
+    {
+     "op": "add",
+     "shape": {
+      "type": "checklist",
+      "rows": [
+       "A"
+      ],
+      "notes": {
+       "Z": "x"
+      }
+     }
+    }
+   ],
+   "applied": 4,
+   "ids": [
+    "c",
+    "todo",
+    "n",
+    "plain",
+    null,
+    null
+   ],
+   "errors": [
+    {
+     "index": 4,
+     "error": "`picks`: no column \"Maybe\" (Yes, No)"
+    },
+    {
+     "index": 5,
+     "error": "`notes`: no row \"Z\""
+    }
+   ]
+  },
+  {
+   "ops": [
+    {
+     "op": "update",
+     "id": "c",
+     "patch": {
+      "picks": {
+       "Ann": null,
+       "Bob": "Yes",
+       "Cy": true
+      },
+      "notes": {
+       "Ann": "veggie",
+       "Bob": ""
+      },
+      "assignees": {
+       "Bob": [
+        "ada"
+       ],
+       "Ann": null
+      }
+     }
+    },
+    {
+     "op": "update",
+     "id": "todo",
+     "patch": {
+      "title": "Before Friday",
+      "picks": {
+       "Order cake": "done"
+      }
+     }
+    },
+    {
+     "op": "update",
+     "id": "n",
+     "patch": {
+      "picks": {
+       "Dishes": true
+      },
+      "notes": {
+       "Bins": "Tuesday"
+      }
+     }
+    },
+    {
+     "op": "update",
+     "id": "plain",
+     "patch": {
+      "view": "checklist"
+     }
+    },
+    {
+     "op": "update",
+     "id": "c",
+     "patch": {
+      "title": "nope",
+      "picks": {
+       "Zed": "Yes"
+      }
+     }
+    }
+   ],
+   "applied": 4,
+   "ids": [
+    "c",
+    "todo",
+    "n",
+    "plain",
+    null
+   ],
+   "errors": [
+    {
+     "index": 4,
+     "error": "`picks`: no row \"Zed\""
+    }
+   ]
+  },
+  {
+   "ops": [
+    {
+     "op": "update",
+     "id": "c",
+     "patch": {
+      "rows": [
+       "Cy",
+       "Dee",
+       "Ann"
+      ],
+      "columns": [
+       "Yes",
+       "No",
+       "Maybe"
+      ],
+      "picks": {
+       "Dee": "maybe"
+      }
+     }
+    },
+    {
+     "op": "update",
+     "id": "todo",
+     "patch": {
+      "rows": [
+       "Order cake",
+       "Balloons"
+      ]
+     }
+    },
+    {
+     "op": "update",
+     "id": "n",
+     "patch": {
+      "view": null
+     }
+    },
+    {
+     "op": "resize",
+     "id": "c",
+     "w": 50,
+     "h": 50
+    },
+    {
+     "op": "move",
+     "id": "todo",
+     "dx": 10,
+     "dy": -5
+    }
+   ],
+   "applied": 5,
+   "ids": [
+    "c",
+    "todo",
+    "n",
+    "c",
+    "todo"
+   ],
+   "errors": []
+  },
+  {
+   "ops": [
+    {
+     "op": "update",
+     "id": "c",
+     "patch": {
+      "columns": [
+       "Yes",
+       "Maybe"
+      ]
+     }
+    },
+    {
+     "op": "update",
+     "id": "plain",
+     "patch": {
+      "text": "### Packing v2\n- [ ] Tent\n- [ ] Stove"
+     }
+    },
+    {
+     "op": "update",
+     "id": "todo",
+     "patch": {
+      "color": "blue",
+      "w": 500
+     }
+    }
+   ],
+   "applied": 3,
+   "ids": [
+    "c",
+    "plain",
+    "todo"
+   ],
+   "errors": []
+  }
+ ],
+ "doc": {
+  "shapes": {
+   "Y.Map": {
+    "c": {
+     "Y.Map": {
+      "assignees:cy": [
+       {
+        "at": {
+         "f64": 1790000000000
+        },
+        "by": "Planner",
+        "byId": "agent:planner",
+        "name": "Someone Else"
+       },
+       {
+        "at": {
+         "f64": 1790000000000
+        },
+        "by": "Planner",
+        "byId": "agent:planner",
+        "email": "ada@example.com",
+        "id": "u-ada",
+        "name": "Ada Lovelace"
+       }
+      ],
+      "by": "Planner",
+      "color": "green",
+      "columns": [
+       "Yes",
+       "Maybe"
+      ],
+      "createdAt": {
+       "f64": 1790000000000
+      },
+      "h": {
+       "i": 215
+      },
+      "id": "c",
+      "noteBy:ann": {
+       "at": {
+        "f64": 1790000000000
+       },
+       "by": "Planner",
+       "byId": "agent:planner"
+      },
+      "text": {
+       "Y.Text": "### Lunch · Fri\n- [x] Cy · Yes\n  @Someone Else\n  @Ada Lovelace\n- [x] Dee · Maybe\n- [ ] Ann\n  > veggie"
+      },
+      "type": "sticky",
+      "updatedAt": {
+       "f64": 1790000000000
+      },
+      "view": "checklist",
+      "w": {
+       "i": 324
+      },
+      "who:cy": {
+       "at": {
+        "f64": 1790000000000
+       },
+       "by": "Planner",
+       "byId": "agent:planner",
+       "col": "Yes"
+      },
+      "who:dee": {
+       "at": {
+        "f64": 1790000000000
+       },
+       "by": "Planner",
+       "byId": "agent:planner",
+       "col": "Maybe"
+      },
+      "x": {
+       "i": 0
+      },
+      "y": {
+       "i": 0
+      },
+      "z": {
+       "i": 1
+      }
+     }
+    },
+    "n": {
+     "Y.Map": {
+      "by": "Planner",
+      "color": "green",
+      "createdAt": {
+       "f64": 1790000000000
+      },
+      "h": {
+       "i": 153
+      },
+      "id": "n",
+      "noteBy:bins": {
+       "at": {
+        "f64": 1790000000000
+       },
+       "by": "Planner",
+       "byId": "agent:planner"
+      },
+      "text": {
+       "Y.Text": "### Chores\n- [x] Dishes\n- [x] Bins\n  > Tuesday"
+      },
+      "type": "sticky",
+      "updatedAt": {
+       "f64": 1790000000000
+      },
+      "w": {
+       "i": 280
+      },
+      "who:dishes": {
+       "at": {
+        "f64": 1790000000000
+       },
+       "by": "Planner",
+       "byId": "agent:planner",
+       "col": "Done"
+      },
+      "x": {
+       "i": 800
+      },
+      "y": {
+       "i": 0
+      },
+      "z": {
+       "i": 3
+      }
+     }
+    },
+    "plain": {
+     "Y.Map": {
+      "by": "Planner",
+      "color": "yellow",
+      "createdAt": {
+       "f64": 1790000000000
+      },
+      "h": {
+       "i": 200
+      },
+      "id": "plain",
+      "text": {
+       "Y.Text": "### Packing v2\n- [ ] Tent\n- [ ] Stove"
+      },
+      "type": "sticky",
+      "updatedAt": {
+       "f64": 1790000000000
+      },
+      "view": "checklist",
+      "w": {
+       "i": 280
+      },
+      "x": {
+       "i": 1200
+      },
+      "y": {
+       "i": 0
+      },
+      "z": {
+       "i": 4
+      }
+     }
+    },
+    "todo": {
+     "Y.Map": {
+      "by": "Planner",
+      "color": "blue",
+      "columns": [
+       "Done"
+      ],
+      "createdAt": {
+       "f64": 1790000000000
+      },
+      "h": {
+       "i": 131
+      },
+      "id": "todo",
+      "text": {
+       "Y.Text": "### Before Friday\n- [x] Order cake\n- [ ] Balloons"
+      },
+      "type": "sticky",
+      "updatedAt": {
+       "f64": 1790000000000
+      },
+      "view": "checklist",
+      "w": {
+       "i": 500
+      },
+      "who:order cake": {
+       "at": {
+        "f64": 1790000000000
+       },
+       "by": "Planner",
+       "byId": "agent:planner",
+       "col": "Done"
+      },
+      "x": {
+       "i": 410
+      },
+      "y": {
+       "i": -5
+      },
+      "z": {
+       "i": 2
+      }
+     }
+    }
+   }
+  },
+  "comments": {
+   "Y.Map": {}
+  }
+ },
+ "read": {
+  "shapes": [
+   {
+    "id": "todo",
+    "type": "sticky",
+    "x": 410,
+    "y": -5,
+    "w": 500,
+    "h": 131,
+    "color": "blue",
+    "z": 2,
+    "by": "Planner",
+    "text": "### Before Friday\n- [x] Order cake\n- [ ] Balloons",
+    "view": "checklist",
+    "title": "Before Friday",
+    "columns": [
+     "Done"
+    ],
+    "rows": [
+     {
+      "label": "Order cake",
+      "pick": "Done",
+      "by": "Planner",
+      "at": 1790000000000
+     },
+     {
+      "label": "Balloons",
+      "pick": null
+     }
+    ],
+    "tally": {
+     "Done": 1
+    }
+   },
+   {
+    "id": "c",
+    "type": "sticky",
+    "x": 0,
+    "y": 0,
+    "w": 324,
+    "h": 215,
+    "color": "green",
+    "z": 1,
+    "by": "Planner",
+    "text": "### Lunch · Fri\n- [x] Cy · Yes\n  @Someone Else\n  @Ada Lovelace\n- [x] Dee · Maybe\n- [ ] Ann\n  > veggie",
+    "view": "checklist",
+    "title": "Lunch · Fri",
+    "columns": [
+     "Yes",
+     "Maybe"
+    ],
+    "rows": [
+     {
+      "label": "Cy",
+      "pick": "Yes",
+      "by": "Planner",
+      "at": 1790000000000,
+      "assignees": [
+       {
+        "name": "Someone Else"
+       },
+       {
+        "name": "Ada Lovelace",
+        "id": "u-ada",
+        "email": "ada@example.com"
+       }
+      ]
+     },
+     {
+      "label": "Dee",
+      "pick": "Maybe",
+      "by": "Planner",
+      "at": 1790000000000
+     },
+     {
+      "label": "Ann",
+      "pick": null,
+      "note": "veggie",
+      "noteBy": "Planner",
+      "noteAt": 1790000000000
+     }
+    ],
+    "tally": {
+     "Yes": 1,
+     "Maybe": 1
+    }
+   },
+   {
+    "id": "n",
+    "type": "sticky",
+    "x": 800,
+    "y": 0,
+    "w": 280,
+    "h": 153,
+    "color": "green",
+    "z": 3,
+    "by": "Planner",
+    "text": "### Chores\n- [x] Dishes\n- [x] Bins\n  > Tuesday"
+   },
+   {
+    "id": "plain",
+    "type": "sticky",
+    "x": 1200,
+    "y": 0,
+    "w": 280,
+    "h": 200,
+    "color": "yellow",
+    "z": 4,
+    "by": "Planner",
+    "text": "### Packing v2\n- [ ] Tent\n- [ ] Stove",
+    "view": "checklist",
+    "title": "Packing v2",
+    "columns": [
+     "Done"
+    ],
+    "rows": [
+     {
+      "label": "Tent",
+      "pick": null
+     },
+     {
+      "label": "Stove",
+      "pick": null
+     }
+    ],
+    "tally": {
+     "Done": 0
+    }
+   }
+  ],
+  "comments": []
+ }
+}

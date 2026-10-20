@@ -4,11 +4,13 @@
 use serde_json::{json, Value};
 use yrs::{Any, Map, MapRef, Out, ReadTxn};
 
-use crate::checklist::{read_checklist, Checklist};
+use crate::checklist::{read_checklist, read_note_checklist, Checklist};
+use crate::checklist_text::VIEW_CHECKLIST;
 use crate::geometry::{arrow_box, arrow_path, js_round, BoxF, End, Point, Side};
 use crate::schema::{
     is_valid_color, jnum, json_f64, out_f64, out_string, out_to_json, ShapeType, SHAPES,
 };
+use crate::timeline_text::{parse_timeline_text, ParsedTimeline, VIEW_TIMELINE};
 
 /// `shape:` prefix some callers put on ids.
 pub fn bare_id(s: &str) -> &str {
@@ -97,6 +99,31 @@ impl ImageRef {
     }
 }
 
+/// How a note is shown: a checklist card or a timeline, its text being the list (stored as
+/// `view` on a sticky).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum View {
+    Checklist,
+    Timeline,
+}
+
+impl View {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            VIEW_CHECKLIST => Some(Self::Checklist),
+            VIEW_TIMELINE => Some(Self::Timeline),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Checklist => VIEW_CHECKLIST,
+            Self::Timeline => VIEW_TIMELINE,
+        }
+    }
+}
+
 /// A plain read of one shape (defaults filled in like the page does).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Shape {
@@ -123,11 +150,47 @@ pub struct Shape {
     pub natural_w: f64,
     pub natural_h: f64,
     pub url: String,
-    /// A checklist's columns, rows and picks (`None` for other types).
+    /// A link's icon (`data:` or `https:`), when it has one.
+    pub favicon: Option<String>,
+    /// A link shown live: the site itself in a frame.
+    pub live: bool,
+    /// A sticky shown as a checklist card or a timeline.
+    pub view: Option<View>,
+    /// A checklist's columns, rows and picks — a legacy checklist's, or a note's in the
+    /// checklist view (`None` for other shapes).
     pub checklist: Option<Checklist>,
+    /// A note in the timeline view: its text, parsed (the range falls back to "today",
+    /// which only the reader knows).
+    pub timeline: Option<ParsedTimeline>,
+}
+
+/// A new live frame's box (world px).
+pub const LIVE_SIZE: (f64, f64) = (960.0, 640.0);
+/// The least a live frame may be resized to.
+pub const LIVE_MIN: (f64, f64) = (320.0, 200.0);
+
+/// The smallest a shape may get: its type's, a live frame's, or a checklist or timeline
+/// card's (the page's `minSizeOf`); `None` for arrows.
+pub fn min_size_for(kind: ShapeType, view: Option<View>, live: bool) -> Option<(f64, f64)> {
+    match (kind, view) {
+        (ShapeType::Sticky, Some(View::Checklist)) => ShapeType::Checklist.min_size(),
+        (ShapeType::Sticky, Some(View::Timeline)) => Some(crate::timeline::TIMELINE_MIN),
+        (ShapeType::Link, _) if live => Some(LIVE_MIN),
+        _ => kind.min_size(),
+    }
+}
+
+/// An `http(s)` URL a live frame can show (the page's `frameUrl`).
+pub fn frame_url(raw: &str) -> bool {
+    url::Url::parse(raw).is_ok_and(|u| matches!(u.scheme(), "http" | "https"))
 }
 
 impl Shape {
+    /// The smallest this shape may get.
+    pub fn min_size(&self) -> Option<(f64, f64)> {
+        min_size_for(self.kind, self.view, self.live)
+    }
+
     pub fn bbox(&self) -> BoxF {
         BoxF {
             x: self.x,
@@ -153,6 +216,7 @@ impl Shape {
 }
 
 /// Reads one shape map; `None` when it is not a readable shape.
+#[allow(clippy::many_single_char_names)]
 pub fn read_shape<T: ReadTxn>(txn: &T, id: &str, out: &Out) -> Option<Shape> {
     let Out::YMap(m) = out else { return None };
     let get = |k: &str| m.get(txn, k);
@@ -167,6 +231,29 @@ pub fn read_shape<T: ReadTxn>(txn: &T, id: &str, out: &Out) -> Option<Shape> {
     let w = num("w").unwrap_or(dw).max(0.0);
     let h = num("h").unwrap_or(dh).max(0.0);
     let is = |t: ShapeType| kind == t;
+    let text = s("text").unwrap_or_default();
+    let mut title = s("title").unwrap_or_default();
+    let view = if is(ShapeType::Sticky) {
+        s("view").as_deref().and_then(View::parse)
+    } else {
+        None
+    };
+    let mut checklist = is(ShapeType::Checklist).then(|| read_checklist(&json));
+    let mut timeline = None;
+    match view {
+        Some(View::Checklist) => {
+            let (t, c) = read_note_checklist(&json, &text);
+            title = t;
+            checklist = Some(c);
+        }
+        Some(View::Timeline) => {
+            let p = parse_timeline_text(&text);
+            title.clone_from(&p.title);
+            timeline = Some(p);
+        }
+        None => {}
+    }
+    let is_link = is(ShapeType::Link);
     Some(Shape {
         id: id.to_owned(),
         x: num("x").unwrap_or(0.0),
@@ -178,8 +265,8 @@ pub fn read_shape<T: ReadTxn>(txn: &T, id: &str, out: &Out) -> Option<Shape> {
         created_at: num("createdAt").unwrap_or(0.0),
         updated_at: num("updatedAt").unwrap_or(0.0),
         z: num("z").unwrap_or(0.0),
-        text: s("text").unwrap_or_default(),
-        title: s("title").unwrap_or_default(),
+        text,
+        title,
         font_size: num("fontSize").filter(|f| *f > 0.0),
         align: s("align").filter(|a| matches!(a.as_str(), "left" | "center" | "right")),
         image: if is(ShapeType::Frame) {
@@ -202,7 +289,11 @@ pub fn read_shape<T: ReadTxn>(txn: &T, id: &str, out: &Out) -> Option<Shape> {
         natural_w: num("naturalW").unwrap_or(w),
         natural_h: num("naturalH").unwrap_or(h),
         url: s("url").unwrap_or_default(),
-        checklist: is(ShapeType::Checklist).then(|| read_checklist(&json)),
+        favicon: s("favicon").filter(|f| is_link && !f.is_empty()),
+        live: is_link && matches!(get("live"), Some(Out::Any(Any::Bool(true)))),
+        view,
+        checklist,
+        timeline,
         kind,
     })
 }

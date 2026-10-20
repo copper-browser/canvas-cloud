@@ -1,13 +1,24 @@
-//! The checklist (RSVP) shape — the page's `Canvas/src/canvas/checklist.ts`: a title,
-//! 1–4 columns ("Yes", "No") and up to 60 rows, each row with at most one pick.
+//! The checklist (RSVP) card — the page's `canvas/checklist.ts`: a title, 1–4 columns
+//! ("Yes", "No") and up to 60 rows (people, tasks), each row with at most one pick, a
+//! comment and up to 12 assignees.
 //!
-//! Stored on the shape's own `Y.Map`, beside the usual box props:
+//! Two stored forms, one card:
+//!
+//! * **A note** (`type:"sticky"`, `view:"checklist"`, what `add` writes since 0.2.0): the
+//!   note's text is the checklist, as markdown every Copper draws as task boxes — see
+//!   [`crate::checklist_text`]. Beside the text, keyed by the row's label
+//!   ([`crate::checklist_text::row_key`]): `who:<label>` → `{col, by, byId, at}` (who
+//!   picked it), `noteBy:<label>` → `{by, byId, at}` (who wrote its comment) and
+//!   `assignees:<label>` → `[{name, id?, email?, by?, byId?, at?}]` (who they are).
+//! * **Legacy** (`type:"checklist"`, what 0.1 wrote), on the shape's own `Y.Map`:
 //!
 //! ```text
-//! title          string
-//! columns        string[]                  whole value, last writer wins
-//! rows           {id, label}[]             whole value, last writer wins
-//! pick:<rowId>   {col, by, byId, at}       one key per row
+//! title               string
+//! columns             string[]                  whole value, last writer wins
+//! rows                {id, label}[]             whole value, last writer wins
+//! pick:<rowId>        {col, by, byId, at}       one key per row
+//! note:<rowId>        {text, by, byId, at}      a row's comment
+//! assignees:<rowId>   [{name, id?, email?, by?, byId?, at?}]
 //! ```
 //!
 //! A pick lives under its row's own key, so two people picking different rows at the
@@ -16,31 +27,70 @@
 
 use serde::Serialize;
 use serde_json::{json, Map as JsonMap, Value};
-use yrs::{Any, Map, MapRef, ReadTxn, TransactionMut};
+use yrs::{Any, Map, MapRef, ReadTxn, TextRef, TransactionMut};
 
-use crate::schema::{jnum, js_slice, json_f64, json_to_any};
+use crate::checklist_text::{
+    assignee_name, note_lines, parse_checklist_text, row_key, who_key, write_row_assignees,
+    write_row_note, write_row_pick, TextRow, TICK_COLUMN, WHO_PREFIX,
+};
+use crate::jsstr::{fold, js_trim, quoted, YText};
+use crate::schema::{jnum, js_len, js_slice, json_f64, json_to_any};
 
 /// Prefix of the per-row pick keys.
 pub const PICK_PREFIX: &str = "pick:";
+/// A legacy card's comment on a row: `note:<rowId>` → `{text, by, byId, at}`.
+pub const NOTE_PREFIX: &str = "note:";
+/// Who last wrote a note's row comment: `noteBy:<label key>` → `{by, byId, at}`.
+pub const NOTE_BY_PREFIX: &str = "noteBy:";
+/// Who a row's assignees are: `assignees:<label key>` on a note, `assignees:<rowId>` on a
+/// legacy card.
+pub const ASSIGNEES_PREFIX: &str = "assignees:";
+/// People on one row.
+pub const MAX_ASSIGNEES: usize = 12;
 pub const MAX_COLUMNS: usize = 4;
 pub const MAX_ROWS: usize = 60;
 /// Labels are cut to these many UTF-16 units (as JavaScript counts).
 pub const MAX_COLUMN_LABEL: usize = 40;
 pub const MAX_ROW_LABEL: usize = 200;
+/// A row's comment is cut to these many characters.
+pub const MAX_NOTE: usize = 4000;
 pub const DEFAULT_COLUMNS: [&str; 2] = ["Yes", "No"];
+/// The smallest a checklist card gets (either form).
+pub const CHECKLIST_MIN: (f64, f64) = (200.0, 72.0);
 
 /// Layout numbers shared with the page (world px), for a fresh card's size.
 const HEAD: f64 = 49.0;
 const COLUMNS_HEAD: f64 = 28.0;
 const ROW: f64 = 34.0;
+/// A row's collapsed comment: one muted line under it.
+pub const NOTE_ROW: f64 = 22.0;
 const FOOT: f64 = 14.0;
 const COL: f64 = 64.0;
 const LABEL: f64 = 168.0;
 const PAD: f64 = 14.0;
 
-/// The pick key of a row.
+/// The pick key of a legacy row.
 pub fn pick_key(row_id: &str) -> String {
     format!("{PICK_PREFIX}{row_id}")
+}
+pub fn note_key(row_id: &str) -> String {
+    format!("{NOTE_PREFIX}{row_id}")
+}
+pub fn note_by_key(label: &str) -> String {
+    format!("{NOTE_BY_PREFIX}{}", row_key(label))
+}
+/// A note row's assignees' ids, by its label.
+pub fn assignees_key(label: &str) -> String {
+    format!("{ASSIGNEES_PREFIX}{}", row_key(label))
+}
+/// A legacy row's assignees, by its id.
+pub fn legacy_assignees_key(row_id: &str) -> String {
+    format!("{ASSIGNEES_PREFIX}{row_id}")
+}
+
+/// A comment as it is kept: `\n` line breaks, at most [`MAX_NOTE`] characters.
+pub fn clean_note(text: &str) -> String {
+    js_slice(&note_lines(text), MAX_NOTE).to_owned()
 }
 
 /// A fresh card's width for this many columns.
@@ -53,10 +103,14 @@ pub fn checklist_width(columns: usize) -> f64 {
     }
 }
 
-/// The height a card needs before anyone has measured it (one line per label).
+/// The height a card needs before anyone has measured it (one line per label, one per
+/// comment).
 #[allow(clippy::cast_precision_loss)]
-pub fn checklist_height(columns: usize, rows: usize) -> f64 {
-    HEAD + if columns > 1 { COLUMNS_HEAD } else { 0.0 } + ROW * rows.max(1) as f64 + FOOT
+pub fn checklist_height(columns: usize, rows: usize, notes: usize) -> f64 {
+    HEAD + if columns > 1 { COLUMNS_HEAD } else { 0.0 }
+        + ROW * rows.max(1) as f64
+        + NOTE_ROW * notes as f64
+        + FOOT
 }
 
 /// One row: a person or a task.
@@ -70,6 +124,23 @@ impl Row {
     pub fn to_json(&self) -> Value {
         json!({ "id": self.id, "label": self.label })
     }
+}
+
+/// The id a note's row goes by: its place among the rows.
+pub fn note_row_id(index: usize) -> String {
+    format!("t{index}")
+}
+
+/// Rows `t0…` for these labels (a note's rows).
+pub fn list_rows<S: AsRef<str>>(labels: &[S]) -> Vec<Row> {
+    labels
+        .iter()
+        .enumerate()
+        .map(|(i, l)| Row {
+            id: note_row_id(i),
+            label: l.as_ref().to_owned(),
+        })
+        .collect()
 }
 
 /// A row's pick: the column's label, who made it and when.
@@ -87,39 +158,125 @@ impl Pick {
     }
 }
 
-/// A checklist as read from the document.
+/// A row's comment and who wrote it, when.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Note {
+    pub text: String,
+    pub by: String,
+    pub by_id: String,
+    pub at: f64,
+}
+
+/// Someone a row is assigned to.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Assignee {
+    pub name: String,
+    /// A cloud user id (lower-case).
+    pub id: Option<String>,
+    pub email: Option<String>,
+    /// Who assigned them, when.
+    pub by: Option<String>,
+    pub by_id: Option<String>,
+    pub at: Option<f64>,
+}
+
+impl Assignee {
+    /// What an assignee keeps on the shape (the page's `storedAssignee`).
+    pub fn stored(&self) -> Value {
+        let mut o = JsonMap::new();
+        o.insert("name".into(), self.name.clone().into());
+        for (k, v) in [
+            ("id", &self.id),
+            ("email", &self.email),
+            ("by", &self.by),
+            ("byId", &self.by_id),
+        ] {
+            if let Some(v) = v.as_ref().filter(|v| !v.is_empty()) {
+                o.insert(k.into(), v.clone().into());
+            }
+        }
+        if let Some(at) = self.at {
+            o.insert("at".into(), jnum(at));
+        }
+        Value::Object(o)
+    }
+
+    /// `{name, id?, email?}` as an agent reads it.
+    pub fn summary(&self) -> Value {
+        let mut o = JsonMap::new();
+        o.insert("name".into(), self.name.clone().into());
+        if let Some(id) = self.id.as_ref().filter(|v| !v.is_empty()) {
+            o.insert("id".into(), id.clone().into());
+        }
+        if let Some(e) = self.email.as_ref().filter(|v| !v.is_empty()) {
+            o.insert("email".into(), e.clone().into());
+        }
+        Value::Object(o)
+    }
+}
+
+/// Someone on the canvas, whom `assignees` resolve against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Person {
+    pub id: String,
+    pub name: String,
+    pub email: Option<String>,
+}
+
+/// A checklist as read from the document (either form).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Checklist {
     pub columns: Vec<String>,
     pub rows: Vec<Row>,
     /// Picks that name a current row and column, in row order.
     pub picks: Vec<(String, Pick)>,
+    /// Row comments, in row order.
+    pub notes: Vec<(String, Note)>,
+    /// Rows' assignees (rows that have some), in row order.
+    pub assignees: Vec<(String, Vec<Assignee>)>,
 }
 
 impl Checklist {
     pub fn pick(&self, row_id: &str) -> Option<&Pick> {
         self.picks.iter().find(|(r, _)| r == row_id).map(|(_, p)| p)
     }
+    pub fn note(&self, row_id: &str) -> Option<&Note> {
+        self.notes.iter().find(|(r, _)| r == row_id).map(|(_, n)| n)
+    }
+    pub fn people(&self, row_id: &str) -> &[Assignee] {
+        self.assignees
+            .iter()
+            .find(|(r, _)| r == row_id)
+            .map_or(&[], |(_, a)| a.as_slice())
+    }
 }
 
-/// `s.trim().toLowerCase()`.
-fn fold(s: &str) -> String {
-    s.trim().to_lowercase()
-}
-
-/// `JSON.stringify(s)`, for messages.
-fn quoted(s: &str) -> String {
-    serde_json::to_string(s).unwrap_or_default()
+/// `Object.entries(o)` in JavaScript's order as far as JSON keeps it: array-index keys
+/// first, ascending, then the rest (the server's maps are sorted, so the rest is
+/// alphabetical rather than insertion order).
+pub fn js_entries(o: &JsonMap<String, Value>) -> Vec<(&String, &Value)> {
+    let index = |k: &str| -> Option<u64> {
+        if k.is_empty() || k.len() > 10 || !k.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        if k.len() > 1 && k.starts_with('0') {
+            return None;
+        }
+        k.parse::<u64>().ok().filter(|n| *n < u64::from(u32::MAX))
+    };
+    let mut out: Vec<(&String, &Value)> = o.iter().collect();
+    out.sort_by_key(|(k, _)| index(k).map_or((1, 0), |n| (0, n)));
+    out
 }
 
 // ---- tolerant reads -----------------------------------------------------------------------
 
-/// Columns as stored: strings, deduplicated, at most four; none → Yes / No.
-pub fn read_columns(v: Option<&Value>) -> Vec<String> {
+/// Columns as stored: strings, deduplicated, at most four; none → `fallback`.
+pub fn read_columns_or(v: Option<&Value>, fallback: &[&str]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for c in v.and_then(Value::as_array).into_iter().flatten() {
         let Some(c) = c.as_str() else { continue };
-        if c.trim().is_empty() || out.iter().any(|o| fold(o) == fold(c)) {
+        if js_trim(c).is_empty() || out.iter().any(|o| fold(o) == fold(c)) {
             continue;
         }
         out.push(c.to_owned());
@@ -128,10 +285,20 @@ pub fn read_columns(v: Option<&Value>) -> Vec<String> {
         }
     }
     if out.is_empty() {
-        DEFAULT_COLUMNS.iter().map(|c| (*c).to_owned()).collect()
+        fallback.iter().map(|c| (*c).to_owned()).collect()
     } else {
         out
     }
+}
+
+/// Columns as stored; none → Yes / No.
+pub fn read_columns(v: Option<&Value>) -> Vec<String> {
+    read_columns_or(v, &DEFAULT_COLUMNS)
+}
+
+/// A note's columns: its own, else one column of ticks.
+pub fn read_note_columns(v: Option<&Value>) -> Vec<String> {
+    read_columns_or(v, &[TICK_COLUMN])
 }
 
 /// Rows as stored: `{id, label}` with unique ids, at most sixty.
@@ -164,6 +331,13 @@ pub fn read_rows(v: Option<&Value>) -> Vec<Row> {
     out
 }
 
+fn str_of(o: &JsonMap<String, Value>, k: &str) -> String {
+    o.get(k)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned()
+}
+
 /// One stored pick, if it names a column.
 pub fn read_pick(v: Option<&Value>) -> Option<Pick> {
     let o = v?.as_object()?;
@@ -171,21 +345,110 @@ pub fn read_pick(v: Option<&Value>) -> Option<Pick> {
         .get("col")
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())?;
-    let s = |k: &str| {
-        o.get(k)
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned()
-    };
     Some(Pick {
         col: col.to_owned(),
-        by: s("by"),
-        by_id: s("byId"),
+        by: str_of(o, "by"),
+        by_id: str_of(o, "byId"),
         at: o.get("at").and_then(json_f64).unwrap_or(0.0),
     })
 }
 
-/// The checklist on a shape map; `get` reads one prop as JSON.
+/// Who wrote a comment and when (`noteBy:` on a note); `None` when unknown.
+fn read_note_by(v: Option<&Value>) -> Option<(String, String, f64)> {
+    let o = v?.as_object()?;
+    let by = o.get("by")?.as_str()?;
+    Some((
+        by.to_owned(),
+        str_of(o, "byId"),
+        o.get("at").and_then(json_f64).unwrap_or(0.0),
+    ))
+}
+
+/// A legacy card's comment on a row, when it has words.
+pub fn read_legacy_note(v: Option<&Value>) -> Option<Note> {
+    let o = v?.as_object()?;
+    let text = o
+        .get("text")
+        .and_then(Value::as_str)
+        .filter(|t| !t.is_empty())?;
+    let (by, by_id, at) = read_note_by(v).unwrap_or_default();
+    Some(Note {
+        text: text.to_owned(),
+        by,
+        by_id,
+        at,
+    })
+}
+
+/// One stored assignee (tolerant: a bare string is a name).
+pub fn read_assignee(v: &Value) -> Option<Assignee> {
+    if let Value::String(s) = v {
+        let name = assignee_name(s);
+        return (!name.is_empty()).then(|| Assignee {
+            name,
+            ..Assignee::default()
+        });
+    }
+    let o = v.as_object()?;
+    let name = assignee_name(o.get("name")?.as_str()?);
+    if name.is_empty() {
+        return None;
+    }
+    let s = |k: &str| o.get(k).and_then(Value::as_str);
+    Some(Assignee {
+        name,
+        id: s("id")
+            .filter(|i| !js_trim(i).is_empty())
+            .map(|i| js_slice(&js_trim(i).to_lowercase(), 80).to_owned()),
+        email: s("email")
+            .filter(|e| e.contains('@'))
+            .map(|e| js_slice(js_trim(e), 200).to_owned()),
+        by: s("by").filter(|b| !b.is_empty()).map(str::to_owned),
+        by_id: s("byId").filter(|b| !b.is_empty()).map(str::to_owned),
+        at: o.get("at").and_then(json_f64).filter(|a| *a > 0.0),
+    })
+}
+
+/// The same person: the same id when both have one, else the same name (any case), else
+/// the same email.
+pub fn same_person(a: &Assignee, b: &Assignee) -> bool {
+    if let (Some(x), Some(y)) = (
+        a.id.as_ref().filter(|i| !i.is_empty()),
+        b.id.as_ref().filter(|i| !i.is_empty()),
+    ) {
+        return x == y;
+    }
+    if fold(&a.name) == fold(&b.name) {
+        return true;
+    }
+    match (
+        a.email.as_ref().filter(|e| !e.is_empty()),
+        b.email.as_ref().filter(|e| !e.is_empty()),
+    ) {
+        (Some(x), Some(y)) => fold(x) == fold(y),
+        _ => false,
+    }
+}
+
+/// A stored list of assignees, each person once, at most twelve.
+pub fn read_assignee_list(v: Option<&Value>) -> Vec<Assignee> {
+    let mut out: Vec<Assignee> = Vec::new();
+    for raw in v.and_then(Value::as_array).into_iter().flatten() {
+        let Some(a) = read_assignee(raw) else {
+            continue;
+        };
+        if out.iter().any(|o| same_person(o, &a)) {
+            continue;
+        }
+        out.push(a);
+        if out.len() == MAX_ASSIGNEES {
+            break;
+        }
+    }
+    out
+}
+
+/// A legacy checklist on a shape map; `get` reads one prop as JSON.
 pub fn read_checklist(get: &dyn Fn(&str) -> Option<Value>) -> Checklist {
     let columns = read_columns(get("columns").as_ref());
     let rows = read_rows(get("rows").as_ref());
@@ -196,11 +459,107 @@ pub fn read_checklist(get: &dyn Fn(&str) -> Option<Value>) -> Checklist {
             columns.contains(&p.col).then(|| (r.id.clone(), p))
         })
         .collect();
+    let notes = rows
+        .iter()
+        .filter_map(|r| {
+            Some((
+                r.id.clone(),
+                read_legacy_note(get(&note_key(&r.id)).as_ref())?,
+            ))
+        })
+        .collect();
+    let assignees = rows
+        .iter()
+        .filter_map(|r| {
+            let people = read_assignee_list(get(&legacy_assignees_key(&r.id)).as_ref());
+            (!people.is_empty()).then(|| (r.id.clone(), people))
+        })
+        .collect();
     Checklist {
         columns,
         rows,
         picks,
+        notes,
+        assignees,
     }
+}
+
+/// A note row's assignees: the names its `@` lines hold, each with whatever is known
+/// beside the note about that name.
+pub fn note_assignees(get: &dyn Fn(&str) -> Option<Value>, row: &TextRow) -> Vec<Assignee> {
+    if row.assignees.is_empty() {
+        return Vec::new();
+    }
+    let known = read_assignee_list(get(&assignees_key(&row.label)).as_ref());
+    row.assignees
+        .iter()
+        .map(
+            |name| match known.iter().find(|p| fold(&p.name) == fold(name)) {
+                Some(k) => Assignee {
+                    name: name.clone(),
+                    ..k.clone()
+                },
+                None => Assignee {
+                    name: name.clone(),
+                    ..Assignee::default()
+                },
+            },
+        )
+        .collect()
+}
+
+/// A note's checklist: its title and the card as the board reads it.
+pub fn read_note_checklist(get: &dyn Fn(&str) -> Option<Value>, text: &str) -> (String, Checklist) {
+    let columns = read_note_columns(get("columns").as_ref());
+    let parsed = parse_checklist_text(text, &columns);
+    let mut c = Checklist {
+        rows: parsed
+            .rows
+            .iter()
+            .map(|r| Row {
+                id: note_row_id(r.index),
+                label: r.label.clone(),
+            })
+            .collect(),
+        ..Checklist::default()
+    };
+    for r in &parsed.rows {
+        let id = note_row_id(r.index);
+        if !r.note.is_empty() {
+            let (by, by_id, at) =
+                read_note_by(get(&note_by_key(&r.label)).as_ref()).unwrap_or_default();
+            c.notes.push((
+                id.clone(),
+                Note {
+                    text: r.note.clone(),
+                    by,
+                    by_id,
+                    at,
+                },
+            ));
+        }
+        if !r.assignees.is_empty() {
+            c.assignees.push((id.clone(), note_assignees(get, r)));
+        }
+        let Some(pick) = &r.pick else { continue };
+        let who = read_pick(get(&who_key(&r.label)).as_ref())
+            .filter(|w| fold(&w.col) == fold(pick))
+            .map(|w| Pick {
+                col: pick.clone(),
+                ..w
+            });
+        c.picks.push((
+            id,
+            who.unwrap_or_else(|| Pick {
+                col: pick.clone(),
+                by: String::new(),
+                by_id: String::new(),
+                at: 0.0,
+            }),
+        ));
+    }
+    c.columns = columns;
+    (parsed.title, c)
 }
 
 /// How many rows picked each column, in column order.
@@ -208,7 +567,11 @@ pub fn tally(c: &Checklist) -> Vec<(String, u64)> {
     c.columns
         .iter()
         .map(|col| {
-            let n = c.picks.iter().filter(|(_, p)| &p.col == col).count();
+            let n = c
+                .rows
+                .iter()
+                .filter(|r| c.pick(&r.id).is_some_and(|p| &p.col == col))
+                .count();
             (col.clone(), n as u64)
         })
         .collect()
@@ -229,31 +592,82 @@ pub fn ser_tally<S: serde::Serializer>(
     m.end()
 }
 
-/// One row as `canvas_read` shows it: `{id, label, pick, by?, at?}`.
+/// One row as `canvas_read` shows it: `{id?, label, pick, by?, at?, note?, noteBy?,
+/// noteAt?, assignees?}` (a note's rows have no `id`: their place is their id).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct RowSummary {
-    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub label: String,
     pub pick: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub by: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub at: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    #[serde(rename = "noteBy", skip_serializing_if = "Option::is_none")]
+    pub note_by: Option<String>,
+    #[serde(rename = "noteAt", skip_serializing_if = "Option::is_none")]
+    pub note_at: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assignees: Option<Vec<Value>>,
 }
 
-/// The rows as `canvas_read` shows them.
-pub fn row_summaries(c: &Checklist) -> Vec<RowSummary> {
+fn row_extras(c: &Checklist, row_id: &str, clip: &dyn Fn(&str) -> String, s: &mut RowSummary) {
+    if let Some(n) = c.note(row_id) {
+        s.note = Some(clip(&n.text));
+        s.note_by = (!n.by.is_empty()).then(|| n.by.clone());
+        s.note_at = (n.at != 0.0).then(|| jnum(n.at));
+    }
+    let people = c.people(row_id);
+    if !people.is_empty() {
+        s.assignees = Some(people.iter().map(Assignee::summary).collect());
+    }
+}
+
+/// A legacy card's rows as `canvas_read` shows them (with ids; `by`/`at` on every pick).
+pub fn row_summaries(c: &Checklist, clip: &dyn Fn(&str) -> String) -> Vec<RowSummary> {
     c.rows
         .iter()
         .map(|r| {
             let p = c.pick(&r.id);
-            RowSummary {
-                id: r.id.clone(),
+            let mut s = RowSummary {
+                id: Some(r.id.clone()),
                 label: r.label.clone(),
                 pick: p.map(|p| p.col.clone()),
                 by: p.map(|p| p.by.clone()),
                 at: p.map(|p| jnum(p.at)),
-            }
+                note: None,
+                note_by: None,
+                note_at: None,
+                assignees: None,
+            };
+            row_extras(c, &r.id, clip, &mut s);
+            s
+        })
+        .collect()
+}
+
+/// A note's rows as `canvas_read` shows them: by label, who and when only when known.
+pub fn note_row_summaries(c: &Checklist, clip: &dyn Fn(&str) -> String) -> Vec<RowSummary> {
+    c.rows
+        .iter()
+        .map(|r| {
+            let p = c.pick(&r.id);
+            let mut s = RowSummary {
+                id: None,
+                label: r.label.clone(),
+                pick: p.map(|p| p.col.clone()),
+                by: p.filter(|p| !p.by.is_empty()).map(|p| p.by.clone()),
+                at: p.filter(|p| p.at != 0.0).map(|p| jnum(p.at)),
+                note: None,
+                note_by: None,
+                note_at: None,
+                assignees: None,
+            };
+            row_extras(c, &r.id, clip, &mut s);
+            s
         })
         .collect()
 }
@@ -270,9 +684,9 @@ pub fn clean_columns(v: &Value) -> Result<Vec<String>, String> {
     for c in list {
         let name = c
             .as_str()
-            .filter(|s| !s.trim().is_empty())
+            .filter(|s| !js_trim(s).is_empty())
             .ok_or("`columns` names must be non-empty strings")?;
-        let name = js_slice(name.trim(), MAX_COLUMN_LABEL).to_owned();
+        let name = js_slice(js_trim(name), MAX_COLUMN_LABEL).to_owned();
         if out.iter().any(|o| fold(o) == fold(&name)) {
             return Err(format!("`columns` has {} twice", quoted(&name)));
         }
@@ -312,7 +726,7 @@ pub fn clean_rows(v: &Value, existing: &[Row]) -> Result<Vec<Row>, String> {
     let mut given: Vec<(String, Option<String>)> = Vec::with_capacity(list.len());
     for r in list {
         match r {
-            Value::String(s) => given.push((js_slice(s.trim(), MAX_ROW_LABEL).to_owned(), None)),
+            Value::String(s) => given.push((js_slice(js_trim(s), MAX_ROW_LABEL).to_owned(), None)),
             Value::Object(o) => {
                 let label = [o.get("label"), o.get("text"), o.get("title")]
                     .into_iter()
@@ -329,7 +743,7 @@ pub fn clean_rows(v: &Value, existing: &[Row]) -> Result<Vec<Row>, String> {
                     Some(Value::String(s)) if valid_row_id(s) => Some(s.clone()),
                     Some(_) => return Err("`rows`: an id must be 1–32 of A–Z a–z 0–9 _ -".into()),
                 };
-                given.push((js_slice(label.trim(), MAX_ROW_LABEL).to_owned(), id));
+                given.push((js_slice(js_trim(label), MAX_ROW_LABEL).to_owned(), id));
             }
             _ => return Err(SHAPE.into()),
         }
@@ -362,8 +776,9 @@ pub fn clean_rows(v: &Value, existing: &[Row]) -> Result<Vec<Row>, String> {
     Ok(out)
 }
 
-/// The row `reference` names: its id, its label, or its label in any case.
-pub fn find_row<'a>(rows: &'a [Row], reference: &str) -> Result<&'a Row, String> {
+/// The row `reference` names: its id, its label, or its label in any case. `field` names
+/// the op's key in a complaint.
+pub fn find_row<'a>(rows: &'a [Row], reference: &str, field: &str) -> Result<&'a Row, String> {
     if let Some(r) = rows.iter().find(|r| r.id == reference) {
         return Ok(r);
     }
@@ -378,13 +793,22 @@ pub fn find_row<'a>(rows: &'a [Row], reference: &str) -> Result<&'a Row, String>
             1 => return Ok(hits[0]),
             _ => {
                 return Err(format!(
-                    "`picks`: more than one row is called {} — use its id",
+                    "`{field}`: more than one row is called {} — use its id",
                     quoted(reference)
                 ))
             }
         }
     }
-    Err(format!("`picks`: no row {}", quoted(reference)))
+    Err(format!("`{field}`: no row {}", quoted(reference)))
+}
+
+/// Keeps the first position of a row, the last value given for it (a JavaScript `Map`).
+fn set_entry<T>(out: &mut Vec<(String, T)>, id: &str, v: T) {
+    if let Some(at) = out.iter().position(|(r, _)| r == id) {
+        out[at].1 = v;
+    } else {
+        out.push((id.to_owned(), v));
+    }
 }
 
 /// `picks`: `{rowIdOrLabel: column | true | null}` → `[(rowId, column | None)]`. A column
@@ -398,8 +822,8 @@ pub fn clean_picks(
         .as_object()
         .ok_or("`picks` must be an object like {\"Ann\": \"Yes\"}")?;
     let mut out: Vec<(String, Option<String>)> = Vec::new();
-    for (reference, value) in o {
-        let row = find_row(rows, reference)?;
+    for (reference, value) in js_entries(o) {
+        let row = find_row(rows, reference, "picks")?;
         let col = match value {
             Value::Null | Value::Bool(false) => None,
             Value::String(s) if s.is_empty() => None,
@@ -415,18 +839,212 @@ pub fn clean_picks(
             ),
             _ => return Err("`picks` values must be a column name, true or null".into()),
         };
-        if let Some(at) = out.iter().position(|(r, _)| *r == row.id) {
-            out[at].1 = col;
-        } else {
-            out.push((row.id.clone(), col));
-        }
+        set_entry(&mut out, &row.id, col);
     }
     Ok(out)
 }
 
+/// `notes`: `{rowIdOrLabel: text | null}` → `[(rowId, text)]`, `""` clearing the row's
+/// comment. Text is cut to [`MAX_NOTE`].
+pub fn clean_notes(v: &Value, rows: &[Row]) -> Result<Vec<(String, String)>, String> {
+    let o = v
+        .as_object()
+        .ok_or("`notes` must be an object like {\"Ann\": \"Back at 6\"}")?;
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (reference, value) in js_entries(o) {
+        let row = find_row(rows, reference, "notes")?;
+        let text = match value {
+            Value::Null | Value::Bool(false) => String::new(),
+            Value::String(s) => clean_note(s),
+            _ => return Err("`notes` values must be text or null".into()),
+        };
+        set_entry(&mut out, &row.id, text);
+    }
+    Ok(out)
+}
+
+/// One assignee as an agent names them — a name, an email or a user id (or `{name, id?,
+/// email?}`) — resolved against the people on the canvas: their id, email, name, or the
+/// start of their name; else a name of its own.
+pub fn resolve_assignee(v: &Value, people: &[Person]) -> Result<Assignee, String> {
+    let owned;
+    let o = match v {
+        Value::String(s) => {
+            let mut m = JsonMap::new();
+            m.insert("name".into(), Value::String(s.clone()));
+            owned = m;
+            &owned
+        }
+        Value::Object(o) => o,
+        _ => {
+            return Err(
+                "`assignees` names must be strings like \"Ann\" or \"ann@example.com\"".into(),
+            )
+        }
+    };
+    let s = |k: &str| o.get(k).and_then(Value::as_str);
+    let said = [s("id"), s("email"), s("name")]
+        .into_iter()
+        .flatten()
+        .find(|x| !js_trim(x).is_empty())
+        .ok_or("`assignees`: each needs a name, an email or an id")?;
+    let key = js_trim(said).trim_start_matches('@').to_lowercase();
+    // The start of a name only when it is one person's.
+    let starts: Vec<&Person> = if js_len(&key) >= 2 {
+        people
+            .iter()
+            .filter(|p| p.name.to_lowercase().starts_with(&key))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let hit = people
+        .iter()
+        .find(|p| p.id.to_lowercase() == key)
+        .or_else(|| {
+            people.iter().find(|p| {
+                p.email
+                    .as_ref()
+                    .is_some_and(|e| !e.is_empty() && e.to_lowercase() == key)
+            })
+        })
+        .or_else(|| people.iter().find(|p| p.name.to_lowercase() == key))
+        .or_else(|| (starts.len() == 1).then(|| starts[0]));
+    if let Some(hit) = hit {
+        let mut name = assignee_name(&hit.name);
+        if name.is_empty() {
+            name = assignee_name(hit.email.as_deref().unwrap_or_default());
+        }
+        if name.is_empty() {
+            "Someone".clone_into(&mut name);
+        }
+        return Ok(Assignee {
+            name,
+            id: Some(hit.id.to_lowercase()),
+            email: hit.email.clone().filter(|e| !e.is_empty()),
+            ..Assignee::default()
+        });
+    }
+    let name = assignee_name(s("name").filter(|n| !js_trim(n).is_empty()).unwrap_or(said));
+    if name.is_empty() {
+        return Err("`assignees`: a name must have letters in it".into());
+    }
+    let email = match s("email").filter(|e| e.contains('@')) {
+        Some(e) => js_trim(e).to_owned(),
+        None if said.contains('@') && !js_trim(said).chars().any(crate::jsstr::is_js_space) => {
+            js_trim(said).to_owned()
+        }
+        None => String::new(),
+    };
+    Ok(Assignee {
+        name,
+        email: (!email.is_empty()).then_some(email),
+        ..Assignee::default()
+    })
+}
+
+/// `assignees`: `{rowIdOrLabel: [who, …] | null}` → `[(rowId, people)]`, an empty list
+/// clearing the row. At most twelve to a row.
+pub fn clean_assignees(
+    v: &Value,
+    rows: &[Row],
+    people: &[Person],
+) -> Result<Vec<(String, Vec<Assignee>)>, String> {
+    let o = v
+        .as_object()
+        .ok_or("`assignees` must be an object like {\"Ann\": [\"Grace Hopper\"]}")?;
+    let mut out: Vec<(String, Vec<Assignee>)> = Vec::new();
+    for (reference, value) in js_entries(o) {
+        let row = find_row(rows, reference, "assignees")?;
+        let given: Vec<Value> = match value {
+            Value::Null | Value::Bool(false) => {
+                set_entry(&mut out, &row.id, Vec::new());
+                continue;
+            }
+            Value::String(_) => vec![value.clone()],
+            Value::Array(a) => a.clone(),
+            _ => return Err("`assignees` values must be a list of names or null".into()),
+        };
+        if given.len() > MAX_ASSIGNEES {
+            return Err(format!(
+                "`assignees`: at most {MAX_ASSIGNEES} people on a row"
+            ));
+        }
+        let mut list: Vec<Assignee> = Vec::new();
+        for g in &given {
+            let p = resolve_assignee(g, people)?;
+            if !list.iter().any(|x| same_person(x, &p)) {
+                list.push(p);
+            }
+        }
+        set_entry(&mut out, &row.id, list);
+    }
+    Ok(out)
+}
+
+/// The people on a row as they will be, from `next`: who stays keeps who assigned them
+/// and when; who is new is assigned by `by`, now. Also who is new.
+pub fn merge_assignees(
+    now: &[Assignee],
+    next: &[Assignee],
+    by: &Picker,
+) -> (Vec<Assignee>, Vec<Assignee>) {
+    let mut out: Vec<Assignee> = Vec::new();
+    let mut added: Vec<Assignee> = Vec::new();
+    for raw in next {
+        let name = assignee_name(&raw.name);
+        if name.is_empty() {
+            continue;
+        }
+        let p = Assignee {
+            name,
+            ..raw.clone()
+        };
+        if out.iter().any(|o| same_person(o, &p)) {
+            continue;
+        }
+        if let Some(was) = now.iter().find(|o| same_person(o, &p)) {
+            out.push(Assignee {
+                name: p.name.clone(),
+                id: p.id.clone().or_else(|| was.id.clone()),
+                email: p.email.clone().or_else(|| was.email.clone()),
+                by: if was.by.as_ref().is_some_and(|b| !b.is_empty()) {
+                    was.by.clone()
+                } else {
+                    p.by.clone().or_else(|| was.by.clone())
+                },
+                by_id: if was.by.as_ref().is_some_and(|b| !b.is_empty()) {
+                    was.by_id.clone()
+                } else {
+                    p.by_id.clone().or_else(|| was.by_id.clone())
+                },
+                at: if was.at.is_some_and(|a| a != 0.0) {
+                    was.at
+                } else {
+                    p.at.or(was.at)
+                },
+            });
+        } else {
+            #[allow(clippy::cast_precision_loss)]
+            let fresh = Assignee {
+                by: Some(by.name.to_owned()),
+                by_id: Some(by.id.to_owned()),
+                at: Some(by.at as f64),
+                ..p
+            };
+            out.push(fresh.clone());
+            added.push(fresh);
+        }
+        if out.len() == MAX_ASSIGNEES {
+            break;
+        }
+    }
+    (out, added)
+}
+
 // ---- writes (inside a transaction) ---------------------------------------------------------
 
-/// Who a pick is attributed to.
+/// Who a pick, comment or assignment is attributed to, and when.
 #[derive(Debug, Clone)]
 pub struct Picker<'a> {
     pub name: &'a str,
@@ -434,11 +1052,39 @@ pub struct Picker<'a> {
     pub at: i64,
 }
 
-fn map_json<T: ReadTxn>(txn: &T, m: &MapRef, k: &str) -> Option<Value> {
+impl Picker<'_> {
+    pub fn stamp(&self, mut o: JsonMap<String, Value>) -> Any {
+        o.insert("by".into(), self.name.into());
+        o.insert("byId".into(), self.id.into());
+        o.insert("at".into(), self.at.into());
+        json_to_any(&Value::Object(o))
+    }
+}
+
+pub fn map_json<T: ReadTxn>(txn: &T, m: &MapRef, k: &str) -> Option<Value> {
     m.get(txn, k).map(|o| crate::schema::out_to_json(txn, &o))
 }
 
-/// Set (or with `col` `None`, clear) one row's pick. Touches no other row.
+pub(crate) fn remove_if_present(txn: &mut TransactionMut, m: &MapRef, key: &str) {
+    if m.contains_key(txn, key) {
+        m.remove(txn, key);
+    }
+}
+
+pub(crate) fn string_list(items: &[String]) -> Any {
+    Any::from(
+        items
+            .iter()
+            .map(|c| Any::from(c.as_str()))
+            .collect::<Vec<_>>(),
+    )
+}
+
+pub(crate) fn people_any(people: &[Assignee]) -> Any {
+    json_to_any(&Value::Array(people.iter().map(Assignee::stored).collect()))
+}
+
+/// Sets (or with `col` `None`, clears) one legacy row's pick. Touches no other row.
 pub fn write_pick(
     txn: &mut TransactionMut,
     m: &MapRef,
@@ -448,36 +1094,19 @@ pub fn write_pick(
 ) {
     let key = pick_key(row_id);
     match col {
-        None => {
-            if m.contains_key(txn, &key) {
-                m.remove(txn, &key);
-            }
-        }
+        None => remove_if_present(txn, m, &key),
         Some(col) => {
-            let pick = Pick {
-                col: col.to_owned(),
-                by: by.name.to_owned(),
-                by_id: by.id.to_owned(),
-                #[allow(clippy::cast_precision_loss)]
-                at: by.at as f64,
-            };
-            m.insert(txn, key, json_to_any(&pick.to_json()));
+            let mut o = JsonMap::new();
+            o.insert("col".into(), col.into());
+            m.insert(txn, key, by.stamp(o));
         }
     }
 }
 
-/// New columns. A pick naming a column whose label is unchanged but for case follows
-/// it; a pick naming a column that has gone is dropped.
+/// New legacy columns. A pick naming a column whose label is unchanged but for case
+/// follows it; a pick naming a column that has gone is dropped.
 pub fn write_columns(txn: &mut TransactionMut, m: &MapRef, next: &[String]) {
-    m.insert(
-        txn,
-        "columns",
-        Any::from(
-            next.iter()
-                .map(|c| Any::from(c.as_str()))
-                .collect::<Vec<_>>(),
-        ),
-    );
+    m.insert(txn, "columns", string_list(next));
     let keys: Vec<String> = m
         .keys(txn)
         .filter(|k| k.starts_with(PICK_PREFIX))
@@ -488,7 +1117,7 @@ pub fn write_columns(txn: &mut TransactionMut, m: &MapRef, next: &[String]) {
             m.remove(txn, &key);
             continue;
         };
-        match next.iter().find(|c| fold(c) == fold(&pick.col)) {
+        match next.iter().rev().find(|c| fold(c) == fold(&pick.col)) {
             None => {
                 m.remove(txn, &key);
             }
@@ -504,14 +1133,28 @@ pub fn write_columns(txn: &mut TransactionMut, m: &MapRef, next: &[String]) {
     }
 }
 
-/// New rows; the picks of rows that are gone go with them.
+/// New legacy rows; the picks, comments and assignees of rows that are gone go with them.
 pub fn write_rows(txn: &mut TransactionMut, m: &MapRef, next: &[Row]) {
     let rows: Vec<Value> = next.iter().map(Row::to_json).collect();
     m.insert(txn, "rows", json_to_any(&Value::Array(rows)));
-    let keep: Vec<String> = next.iter().map(|r| pick_key(&r.id)).collect();
+    let keep: Vec<String> = next
+        .iter()
+        .flat_map(|r| {
+            [
+                pick_key(&r.id),
+                note_key(&r.id),
+                legacy_assignees_key(&r.id),
+            ]
+        })
+        .collect();
     let gone: Vec<String> = m
         .keys(txn)
-        .filter(|k| k.starts_with(PICK_PREFIX) && !keep.iter().any(|kk| kk == k))
+        .filter(|k| {
+            (k.starts_with(PICK_PREFIX)
+                || k.starts_with(NOTE_PREFIX)
+                || k.starts_with(ASSIGNEES_PREFIX))
+                && !keep.iter().any(|kk| kk == k)
+        })
         .map(str::to_owned)
         .collect();
     for key in gone {
@@ -519,226 +1162,232 @@ pub fn write_rows(txn: &mut TransactionMut, m: &MapRef, next: &[Row]) {
     }
 }
 
-/// The checklist props of an add or update, split from the plain ones: `columns` and
-/// `rows` (already cleaned) and the raw `picks`.
-#[derive(Debug, Default)]
-pub struct ChecklistInput {
-    pub columns: Option<Vec<String>>,
-    pub rows: Option<Vec<Row>>,
-    pub picks: Option<Value>,
+/// Sets (or with `""` clears) a legacy card's comment on one row.
+pub fn write_legacy_note(
+    txn: &mut TransactionMut,
+    m: &MapRef,
+    row_id: &str,
+    text: &str,
+    by: &Picker,
+) {
+    let key = note_key(row_id);
+    if text.is_empty() {
+        remove_if_present(txn, m, &key);
+        return;
+    }
+    let mut o = JsonMap::new();
+    o.insert("text".into(), text.into());
+    m.insert(txn, key, by.stamp(o));
 }
 
-impl ChecklistInput {
-    /// Takes `columns`, `rows` and `picks` out of cleaned props.
-    pub fn take(props: &mut JsonMap<String, Value>) -> Self {
-        let columns = props.remove("columns").map(|v| read_columns(Some(&v)));
-        let rows = props.remove("rows").map(|v| {
-            v.as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|r| {
-                    Some(Row {
-                        id: r.get("id")?.as_str()?.to_owned(),
-                        label: r.get("label")?.as_str()?.to_owned(),
-                    })
-                })
-                .collect()
-        });
-        Self {
+/// Sets a legacy row's assignees (merged with who is on it now).
+pub fn write_legacy_assignees(
+    txn: &mut TransactionMut,
+    m: &MapRef,
+    row_id: &str,
+    next: &[Assignee],
+    by: &Picker,
+) {
+    let key = legacy_assignees_key(row_id);
+    let now = read_assignee_list(map_json(txn, m, &key).as_ref());
+    let (people, _added) = merge_assignees(&now, next, by);
+    if people.is_empty() {
+        m.remove(txn, &key);
+    } else {
+        m.insert(txn, key, people_any(&people));
+    }
+}
+
+/// What a legacy checklist update writes, checked against the lists as they will be.
+#[derive(Debug, Default)]
+pub struct LegacyPlan {
+    pub columns: Option<Vec<String>>,
+    pub rows: Option<Vec<Row>>,
+    pub picks: Vec<(String, Option<String>)>,
+    pub notes: Vec<(String, String)>,
+    pub assignees: Vec<(String, Vec<Assignee>)>,
+}
+
+impl LegacyPlan {
+    /// Checks `picks`, `notes` and `assignees` against the final rows and columns.
+    pub fn check(
+        columns: Option<Vec<String>>,
+        rows: Option<Vec<Row>>,
+        raw: &JsonMap<String, Value>,
+        live: &Checklist,
+        people: &[Person],
+    ) -> Result<Self, String> {
+        let final_rows = rows.as_deref().unwrap_or(&live.rows);
+        let final_cols = columns.as_deref().unwrap_or(&live.columns);
+        let picks = match raw.get("picks") {
+            None => Vec::new(),
+            Some(p) => clean_picks(p, final_rows, final_cols)?,
+        };
+        let notes = match raw.get("notes") {
+            None => Vec::new(),
+            Some(n) => clean_notes(n, final_rows)?,
+        };
+        let assignees = match raw.get("assignees") {
+            None => Vec::new(),
+            Some(a) => clean_assignees(a, final_rows, people)?,
+        };
+        Ok(Self {
             columns,
             rows,
-            picks: props.remove("picks"),
+            picks,
+            notes,
+            assignees,
+        })
+    }
+
+    /// The page's `writeChecklist`: new rows and columns (dropping what they orphan), then
+    /// the picks, comments and assignees; fresh lists also size the card unless the op
+    /// sized it.
+    pub fn write(
+        &self,
+        txn: &mut TransactionMut,
+        m: &MapRef,
+        live: &Checklist,
+        live_w: f64,
+        by: &Picker,
+        sized: (bool, bool),
+    ) {
+        let rows = self.rows.as_deref().unwrap_or(&live.rows);
+        let columns = self.columns.as_deref().unwrap_or(&live.columns);
+        if let Some(c) = &self.columns {
+            write_columns(txn, m, c);
+        }
+        if let Some(r) = &self.rows {
+            write_rows(txn, m, r);
+        }
+        for (row, col) in &self.picks {
+            write_pick(txn, m, row, col.as_deref(), by);
+        }
+        for (row, text) in &self.notes {
+            write_legacy_note(txn, m, row, text, by);
+        }
+        for (row, next) in &self.assignees {
+            write_legacy_assignees(txn, m, row, next, by);
+        }
+        if self.columns.is_some() && !sized.0 {
+            let w = live_w.max(checklist_width(columns.len()));
+            m.insert(txn, "w", crate::schema::num_any(w));
+        }
+        if (self.rows.is_some() || self.columns.is_some()) && !sized.1 {
+            let h = checklist_height(columns.len(), rows.len(), 0);
+            m.insert(txn, "h", crate::schema::num_any(h));
         }
     }
 }
 
-/// The page's `writeChecklist`: new rows and columns (dropping the picks they orphan),
-/// then the op's picks; fresh lists also size the card unless the op sized it.
-pub fn write_checklist(
+// ---- writes on a note in the checklist view ------------------------------------------------
+
+/// Sets (or clears) a note row's pick and who made it.
+pub fn write_note_pick(
     txn: &mut TransactionMut,
     m: &MapRef,
-    input: &ChecklistInput,
+    t: &TextRef,
+    row: &TextRow,
+    col: Option<&str>,
+    columns: &[String],
     by: &Picker,
-    sized_w: bool,
-    sized_h: bool,
-) -> Result<(), String> {
-    let live = read_checklist(&|k| map_json(txn, m, k));
-    let rows = input.rows.as_deref().unwrap_or(&live.rows);
-    let columns = input.columns.as_deref().unwrap_or(&live.columns);
-    let resolved = match &input.picks {
-        None => Vec::new(),
-        Some(p) => clean_picks(p, rows, columns)?,
+) {
+    write_row_pick(&mut YText { txn, t }, row, col, columns);
+    let key = who_key(&row.label);
+    match col {
+        Some(col) if !col.is_empty() => {
+            let mut o = JsonMap::new();
+            o.insert("col".into(), col.into());
+            m.insert(txn, key, by.stamp(o));
+        }
+        _ => remove_if_present(txn, m, &key),
+    }
+}
+
+/// Sets (or with `""` clears) a note row's comment and who wrote it.
+pub fn write_note_note(
+    txn: &mut TransactionMut,
+    m: &MapRef,
+    t: &TextRef,
+    row: &TextRow,
+    text: &str,
+    by: &Picker,
+) {
+    write_row_note(&mut YText { txn, t }, row, text);
+    let key = note_by_key(&row.label);
+    if text.is_empty() {
+        remove_if_present(txn, m, &key);
+    } else {
+        m.insert(txn, key, by.stamp(JsonMap::new()));
+    }
+}
+
+/// Sets a note row's assignees: their `@` lines, and who they are beside the note.
+pub fn write_note_assignees(
+    txn: &mut TransactionMut,
+    m: &MapRef,
+    t: &TextRef,
+    row: &TextRow,
+    people: &[Assignee],
+) {
+    let names: Vec<&str> = people.iter().map(|p| p.name.as_str()).collect();
+    write_row_assignees(&mut YText { txn, t }, row, &names);
+    let key = assignees_key(&row.label);
+    if people.is_empty() {
+        remove_if_present(txn, m, &key);
+    } else {
+        m.insert(txn, key, people_any(people));
+    }
+}
+
+/// New columns for a note. Each row keeps its pick when the column stays (the same name in
+/// any case) and loses it when the column goes; only lines whose meaning would change are
+/// rewritten.
+pub fn write_note_columns(txn: &mut TransactionMut, m: &MapRef, t: &TextRef, next: &[String]) {
+    use yrs::GetString as _;
+    let old = read_note_columns(map_json(txn, m, "columns").as_ref());
+    let text = t.get_string(txn);
+    let before = parse_checklist_text(&text, &old);
+    let after = parse_checklist_text(&text, next);
+    let want = |pick: Option<&str>| -> Option<String> {
+        let pick = pick?;
+        next.iter().rev().find(|c| fold(c) == fold(pick)).cloned()
     };
-    let (rows, columns) = (rows.to_vec(), columns.to_vec());
-    if input.columns.is_some() {
-        write_columns(txn, m, &columns);
+    // Last row first: each write stays inside its own line, so earlier offsets hold.
+    for (i, row) in before.rows.iter().enumerate().rev() {
+        let to = want(row.pick.as_deref());
+        if let Some(now) = after.rows.get(i) {
+            if now.pick == to
+                && now.label == row.label
+                && !(next.len() == 1 && row.suffix.is_some())
+            {
+                continue;
+            }
+        }
+        write_row_pick(&mut YText { txn, t }, row, to.as_deref(), next);
     }
-    if input.rows.is_some() {
-        write_rows(txn, m, &rows);
+    m.insert(txn, "columns", string_list(next));
+    let keys: Vec<String> = m
+        .keys(txn)
+        .filter(|k| k.starts_with(WHO_PREFIX))
+        .map(str::to_owned)
+        .collect();
+    for key in keys {
+        let who = read_pick(map_json(txn, m, &key).as_ref());
+        let to = who.as_ref().and_then(|w| want(Some(&w.col)));
+        match (who, to) {
+            (Some(who), Some(to)) => {
+                if to != who.col {
+                    let moved = Pick { col: to, ..who };
+                    m.insert(txn, key, json_to_any(&moved.to_json()));
+                }
+            }
+            _ => {
+                m.remove(txn, &key);
+            }
+        }
     }
-    for (row, col) in &resolved {
-        write_pick(txn, m, row, col.as_deref(), by);
-    }
-    if input.columns.is_some() && !sized_w {
-        let w = map_json(txn, m, "w")
-            .as_ref()
-            .and_then(json_f64)
-            .unwrap_or(0.0);
-        let w = w.max(checklist_width(columns.len()));
-        m.insert(txn, "w", crate::schema::num_any(w));
-    }
-    if (input.rows.is_some() || input.columns.is_some()) && !sized_h {
-        let h = checklist_height(columns.len(), rows.len());
-        m.insert(txn, "h", crate::schema::num_any(h));
-    }
-    Ok(())
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn rows(labels: &[(&str, &str)]) -> Vec<Row> {
-        labels
-            .iter()
-            .map(|(id, label)| Row {
-                id: (*id).to_owned(),
-                label: (*label).to_owned(),
-            })
-            .collect()
-    }
-
-    #[test]
-    fn reads_tolerantly() {
-        assert_eq!(read_columns(None), ["Yes", "No"]);
-        assert_eq!(
-            read_columns(Some(&json!([
-                "Yes", "yes", "", 3, "No", "Maybe", "Later", "Never"
-            ]))),
-            ["Yes", "No", "Maybe", "Later"]
-        );
-        assert_eq!(
-            read_rows(Some(
-                &json!([{"id": "a", "label": "A"}, {"id": "a", "label": "dup"}, {"label": "no id"}, "str", {"id": "b"}])
-            )),
-            rows(&[("a", "A"), ("b", "")])
-        );
-        assert_eq!(read_pick(Some(&json!({"col": ""}))), None);
-        assert_eq!(
-            read_pick(Some(&json!({"col": "Yes", "at": 5}))),
-            Some(Pick {
-                col: "Yes".into(),
-                by: String::new(),
-                by_id: String::new(),
-                at: 5.0
-            })
-        );
-    }
-
-    #[test]
-    fn cleans_columns() {
-        assert_eq!(
-            clean_columns(&json!([" Yes ", "No"])).unwrap(),
-            ["Yes", "No"]
-        );
-        assert_eq!(
-            clean_columns(&json!(["x".repeat(60)])).unwrap()[0].len(),
-            40
-        );
-        assert!(clean_columns(&json!([])).unwrap_err().contains("1 to 4"));
-        assert!(clean_columns(&json!(["a", "b", "c", "d", "e"]))
-            .unwrap_err()
-            .contains("1 to 4"));
-        assert_eq!(
-            clean_columns(&json!(["Yes", "yes"])).unwrap_err(),
-            "`columns` has \"yes\" twice"
-        );
-        assert!(clean_columns(&json!(["Yes", ""]))
-            .unwrap_err()
-            .contains("non-empty"));
-    }
-
-    #[test]
-    fn cleans_rows_keeping_ids() {
-        let existing = rows(&[("a", "Ann"), ("b", "Bob")]);
-        let out = clean_rows(
-            &json!(["Bob", {"label": "Ann", "id": "a"}, "Cy", {"text": "Dee"}]),
-            &existing,
-        )
-        .unwrap();
-        let labels: Vec<&str> = out.iter().map(|r| r.label.as_str()).collect();
-        assert_eq!(labels, ["Bob", "Ann", "Cy", "Dee"]);
-        assert_eq!(out[0].id, "b");
-        assert_eq!(out[1].id, "a");
-        assert!(out.iter().all(|r| valid_row_id(&r.id)));
-        let mut ids: Vec<&str> = out.iter().map(|r| r.id.as_str()).collect();
-        ids.dedup();
-        assert_eq!(ids.len(), 4);
-        assert!(clean_rows(&json!("Ann"), &[]).unwrap_err().contains("list"));
-        let many: Vec<String> = (0..61).map(|i| format!("p{i}")).collect();
-        assert!(clean_rows(&json!(many), &[]).unwrap_err().contains("60"));
-        assert!(clean_rows(&json!([{"label": "x", "id": "bad id!"}]), &[])
-            .unwrap_err()
-            .contains("id"));
-        assert!(clean_rows(
-            &json!([{"label": "x", "id": "a"}, {"label": "y", "id": "a"}]),
-            &[]
-        )
-        .unwrap_err()
-        .contains("twice"));
-        assert!(clean_rows(&json!([{"label": 3}]), &[])
-            .unwrap_err()
-            .contains("string"));
-    }
-
-    #[test]
-    fn cleans_picks() {
-        let rs = rows(&[("a", "Ann"), ("b", "Bob"), ("c", "bob")]);
-        let cols = vec!["Yes".to_owned(), "No".to_owned()];
-        let mut got =
-            clean_picks(&json!({"a": "yes", "Bob": "No", "c": null}), &rs, &cols).unwrap();
-        got.sort();
-        assert_eq!(
-            got,
-            [
-                ("a".to_owned(), Some("Yes".to_owned())),
-                ("b".to_owned(), Some("No".to_owned())),
-                ("c".to_owned(), None)
-            ]
-        );
-        assert_eq!(
-            clean_picks(&json!({"ann": true}), &rs, &["Done".to_owned()]).unwrap(),
-            [("a".to_owned(), Some("Done".to_owned()))]
-        );
-        assert!(clean_picks(&json!({"BOB": "Yes"}), &rs, &cols)
-            .unwrap_err()
-            .contains("more than one"));
-        assert_eq!(
-            clean_picks(&json!({"Zed": "Yes"}), &rs, &cols).unwrap_err(),
-            "`picks`: no row \"Zed\""
-        );
-        assert_eq!(
-            clean_picks(&json!({"Ann": "Maybe"}), &rs, &cols).unwrap_err(),
-            "`picks`: no column \"Maybe\" (Yes, No)"
-        );
-        assert!(clean_picks(&json!(["Ann"]), &rs, &cols)
-            .unwrap_err()
-            .contains("object"));
-        assert!(clean_picks(&json!({"Ann": 1}), &rs, &cols)
-            .unwrap_err()
-            .contains("values"));
-    }
-
-    #[test]
-    fn sizes_like_the_page() {
-        assert!((checklist_width(2) - 324.0).abs() < f64::EPSILON);
-        assert!((checklist_width(1) - 280.0).abs() < f64::EPSILON);
-        assert!((checklist_height(2, 3) - (49.0 + 28.0 + 102.0 + 14.0)).abs() < f64::EPSILON);
-        assert!((checklist_height(1, 0) - 97.0).abs() < f64::EPSILON);
-        let id = new_row_id();
-        assert!(
-            id.starts_with('r') && id.len() == 9 && valid_row_id(&id),
-            "{id}"
-        );
-    }
-}
+mod tests;

@@ -1,0 +1,576 @@
+{
+ "name": "timeline",
+ "now": 1790000000000,
+ "by": "Planner",
+ "byId": "agent:planner",
+ "people": [
+  {
+   "id": "u-grace",
+   "name": "Grace Hopper",
+   "email": "grace@example.com"
+  },
+  {
+   "id": "u-ada",
+   "name": "Ada Lovelace",
+   "email": "ada@example.com"
+  }
+ ],
+ "seed": {},
+ "steps": [
+  {
+   "ops": [
+    {
+     "op": "add",
+     "shape": {
+      "id": "t",
+      "type": "timeline",
+      "x": 0,
+      "y": 0,
+      "title": "Q4 launch",
+      "start": "2026-10-01",
+      "end": "2026-12-31",
+      "items": [
+       {
+        "date": "2026-10-14",
+        "label": "Kickoff"
+       },
+       {
+        "date": "2026-10-20",
+        "end": "2026-11-03",
+        "label": "Build",
+        "color": "blue"
+       },
+       {
+        "date": "2026-11-10",
+        "label": "Beta",
+        "text": "invite **50** users\nthen widen",
+        "color": "pink"
+       },
+       {
+        "date": "2026-12-01",
+        "label": "GA",
+        "kind": "bubble"
+       }
+      ]
+     }
+    },
+    {
+     "op": "add",
+     "shape": {
+      "id": "bare",
+      "type": "timeline",
+      "x": 0,
+      "y": 600
+     }
+    },
+    {
+     "op": "add",
+     "shape": {
+      "id": "span",
+      "type": "timeline",
+      "x": 1000,
+      "y": 0,
+      "title": "Span",
+      "items": [
+       {
+        "date": "2026-03-02",
+        "label": "a"
+       },
+       {
+        "date": "2027-08-09",
+        "label": "b"
+       }
+      ]
+     }
+    },
+    {
+     "op": "add",
+     "shape": {
+      "id": "txt",
+      "type": "sticky",
+      "view": "timeline",
+      "x": 1000,
+      "y": 600,
+      "text": "### Trip\n2026-09-01 → 2026-09-30 · by week\n- 2026-09-05 · Fly out\n- 2026-09-20 · Fly back"
+     }
+    },
+    {
+     "op": "add",
+     "shape": {
+      "id": "nt",
+      "type": "sticky",
+      "x": 2000,
+      "y": 0,
+      "text": "- 2026-09-25 · Party\n- 2026-10-02 · Cleanup"
+     }
+    },
+    {
+     "op": "add",
+     "shape": {
+      "type": "timeline",
+      "editItems": {
+       "a": null
+      }
+     }
+    },
+    {
+     "op": "add",
+     "shape": {
+      "type": "timeline",
+      "items": [
+       {
+        "date": "soon"
+       }
+      ]
+     }
+    }
+   ],
+   "applied": 5,
+   "ids": [
+    "t",
+    "bare",
+    "span",
+    "txt",
+    "nt",
+    null,
+    null
+   ],
+   "errors": [
+    {
+     "index": 5,
+     "error": "`editItems` is for an update; give a new timeline its `items`"
+    },
+    {
+     "index": 6,
+     "error": "items[0].date must be a YYYY-MM-DD date"
+    }
+   ]
+  },
+  {
+   "ops": [
+    {
+     "op": "update",
+     "id": "t",
+     "patch": {
+      "addItems": [
+       {
+        "date": "2026-10-28",
+        "label": "Review",
+        "color": "green"
+       }
+      ],
+      "editItems": {
+       "3": {
+        "color": null
+       },
+       "2026-10-14 · Kickoff": {
+        "label": "Kick-off",
+        "text": "all hands"
+       },
+       "Build": {
+        "end": "2026-11-07"
+       },
+       "GA": null
+      }
+     }
+    },
+    {
+     "op": "update",
+     "id": "bare",
+     "patch": {
+      "title": "Renamed",
+      "start": "2026-09-01",
+      "end": "2026-10-15",
+      "step": "day"
+     }
+    },
+    {
+     "op": "update",
+     "id": "nt",
+     "patch": {
+      "view": "timeline"
+     }
+    },
+    {
+     "op": "update",
+     "id": "txt",
+     "patch": {
+      "editItems": {
+       "Nope": null
+      }
+     }
+    },
+    {
+     "op": "update",
+     "id": "txt",
+     "patch": {
+      "items": [
+       {
+        "date": "2026-09-07",
+        "label": "Only"
+       }
+      ],
+      "step": "month"
+     }
+    }
+   ],
+   "applied": 4,
+   "ids": [
+    "t",
+    "bare",
+    "nt",
+    null,
+    "txt"
+   ],
+   "errors": [
+    {
+     "index": 3,
+     "error": "no item \"Nope\" on this timeline (name one by \"YYYY-MM-DD · label\", its label, its date or its index)"
+    }
+   ]
+  },
+  {
+   "ops": [
+    {
+     "op": "resize",
+     "id": "t",
+     "w": 200,
+     "h": 10
+    },
+    {
+     "op": "update",
+     "id": "span",
+     "patch": {
+      "view": null
+     }
+    },
+    {
+     "op": "update",
+     "id": "bare",
+     "patch": {
+      "text": "### Fresh\n- 2026-09-30 · One"
+     }
+    }
+   ],
+   "applied": 3,
+   "ids": [
+    "t",
+    "span",
+    "bare"
+   ],
+   "errors": []
+  }
+ ],
+ "doc": {
+  "shapes": {
+   "Y.Map": {
+    "bare": {
+     "Y.Map": {
+      "by": "Planner",
+      "color": "white",
+      "createdAt": {
+       "f64": 1790000000000
+      },
+      "h": {
+       "i": 300
+      },
+      "id": "bare",
+      "text": {
+       "Y.Text": "### Fresh\n- 2026-09-30 · One"
+      },
+      "type": "sticky",
+      "updatedAt": {
+       "f64": 1790000000000
+      },
+      "view": "timeline",
+      "w": {
+       "i": 880
+      },
+      "x": {
+       "i": 0
+      },
+      "y": {
+       "i": 600
+      },
+      "z": {
+       "i": 2
+      }
+     }
+    },
+    "nt": {
+     "Y.Map": {
+      "by": "Planner",
+      "color": "yellow",
+      "createdAt": {
+       "f64": 1790000000000
+      },
+      "h": {
+       "i": 200
+      },
+      "id": "nt",
+      "text": {
+       "Y.Text": "- 2026-09-25 · Party\n- 2026-10-02 · Cleanup"
+      },
+      "type": "sticky",
+      "updatedAt": {
+       "f64": 1790000000000
+      },
+      "view": "timeline",
+      "w": {
+       "i": 880
+      },
+      "x": {
+       "i": 2000
+      },
+      "y": {
+       "i": 0
+      },
+      "z": {
+       "i": 5
+      }
+     }
+    },
+    "span": {
+     "Y.Map": {
+      "by": "Planner",
+      "color": "white",
+      "createdAt": {
+       "f64": 1790000000000
+      },
+      "h": {
+       "i": 300
+      },
+      "id": "span",
+      "text": {
+       "Y.Text": "### Span\n2026-03-02 → 2027-08-09 · monthly\n\n- 2026-03-02 · a\n- 2027-08-09 · b"
+      },
+      "type": "sticky",
+      "updatedAt": {
+       "f64": 1790000000000
+      },
+      "w": {
+       "i": 880
+      },
+      "x": {
+       "i": 1000
+      },
+      "y": {
+       "i": 0
+      },
+      "z": {
+       "i": 3
+      }
+     }
+    },
+    "t": {
+     "Y.Map": {
+      "by": "Planner",
+      "color": "white",
+      "createdAt": {
+       "f64": 1790000000000
+      },
+      "h": {
+       "i": 273
+      },
+      "id": "t",
+      "text": {
+       "Y.Text": "### Q4 launch\n2026-10-01 → 2026-12-31 · weekly\n\n- 2026-10-14 · Kick-off\n  > all hands\n- 2026-10-20 → 2026-11-07 · Build · blue\n- 2026-10-28 · Review · green\n- 2026-11-10 · Beta · pink\n  > invite **50** users\n  > then widen"
+      },
+      "type": "sticky",
+      "updatedAt": {
+       "f64": 1790000000000
+      },
+      "view": "timeline",
+      "w": {
+       "i": 360
+      },
+      "x": {
+       "i": 0
+      },
+      "y": {
+       "i": 0
+      },
+      "z": {
+       "i": 1
+      }
+     }
+    },
+    "txt": {
+     "Y.Map": {
+      "by": "Planner",
+      "color": "white",
+      "createdAt": {
+       "f64": 1790000000000
+      },
+      "h": {
+       "i": 300
+      },
+      "id": "txt",
+      "text": {
+       "Y.Text": "### Trip\n2026-09-04 → 2026-09-21 · monthly\n2026-09-01 → 2026-09-30 · by week\n- 2026-09-07 · Only"
+      },
+      "type": "sticky",
+      "updatedAt": {
+       "f64": 1790000000000
+      },
+      "view": "timeline",
+      "w": {
+       "i": 880
+      },
+      "x": {
+       "i": 1000
+      },
+      "y": {
+       "i": 600
+      },
+      "z": {
+       "i": 4
+      }
+     }
+    }
+   }
+  },
+  "comments": {
+   "Y.Map": {}
+  }
+ },
+ "read": {
+  "shapes": [
+   {
+    "id": "t",
+    "type": "sticky",
+    "x": 0,
+    "y": 0,
+    "w": 360,
+    "h": 273,
+    "color": "white",
+    "z": 1,
+    "by": "Planner",
+    "text": "### Q4 launch\n2026-10-01 → 2026-12-31 · weekly\n\n- 2026-10-14 · Kick-off\n  > all hands\n- 2026-10-20 → 2026-11-07 · Build · blue\n- 2026-10-28 · Review · green\n- 2026-11-10 · Beta · pink\n  > invite **50** users\n  > then widen",
+    "view": "timeline",
+    "title": "Q4 launch",
+    "start": "2026-10-01",
+    "end": "2026-12-31",
+    "step": "week",
+    "items": [
+     {
+      "date": "2026-10-14",
+      "label": "Kick-off",
+      "text": "all hands",
+      "kind": "bubble"
+     },
+     {
+      "date": "2026-10-20",
+      "end": "2026-11-07",
+      "label": "Build",
+      "color": "blue",
+      "kind": "section"
+     },
+     {
+      "date": "2026-10-28",
+      "label": "Review",
+      "color": "green",
+      "kind": "note"
+     },
+     {
+      "date": "2026-11-10",
+      "label": "Beta",
+      "text": "invite **50** users\nthen widen",
+      "color": "pink",
+      "kind": "bubble"
+     }
+    ]
+   },
+   {
+    "id": "span",
+    "type": "sticky",
+    "x": 1000,
+    "y": 0,
+    "w": 880,
+    "h": 300,
+    "color": "white",
+    "z": 3,
+    "by": "Planner",
+    "text": "### Span\n2026-03-02 → 2027-08-09 · monthly\n\n- 2026-03-02 · a\n- 2027-08-09 · b"
+   },
+   {
+    "id": "nt",
+    "type": "sticky",
+    "x": 2000,
+    "y": 0,
+    "w": 880,
+    "h": 200,
+    "color": "yellow",
+    "z": 5,
+    "by": "Planner",
+    "text": "- 2026-09-25 · Party\n- 2026-10-02 · Cleanup",
+    "view": "timeline",
+    "title": "",
+    "start": "2026-09-24",
+    "end": "2026-10-03",
+    "step": "week",
+    "items": [
+     {
+      "date": "2026-09-25",
+      "label": "Party",
+      "kind": "note"
+     },
+     {
+      "date": "2026-10-02",
+      "label": "Cleanup",
+      "kind": "note"
+     }
+    ]
+   },
+   {
+    "id": "bare",
+    "type": "sticky",
+    "x": 0,
+    "y": 600,
+    "w": 880,
+    "h": 300,
+    "color": "white",
+    "z": 2,
+    "by": "Planner",
+    "text": "### Fresh\n- 2026-09-30 · One",
+    "view": "timeline",
+    "title": "Fresh",
+    "start": "2026-09-29",
+    "end": "2026-10-01",
+    "step": "week",
+    "items": [
+     {
+      "date": "2026-09-30",
+      "label": "One",
+      "kind": "note"
+     }
+    ]
+   },
+   {
+    "id": "txt",
+    "type": "sticky",
+    "x": 1000,
+    "y": 600,
+    "w": 880,
+    "h": 300,
+    "color": "white",
+    "z": 4,
+    "by": "Planner",
+    "text": "### Trip\n2026-09-04 → 2026-09-21 · monthly\n2026-09-01 → 2026-09-30 · by week\n- 2026-09-07 · Only",
+    "view": "timeline",
+    "title": "Trip",
+    "start": "2026-09-04",
+    "end": "2026-09-21",
+    "step": "month",
+    "items": [
+     {
+      "date": "2026-09-07",
+      "label": "Only",
+      "kind": "note"
+     }
+    ]
+   }
+  ],
+  "comments": []
+ }
+}

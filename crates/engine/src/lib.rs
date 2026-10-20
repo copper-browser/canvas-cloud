@@ -24,10 +24,13 @@ use canvas_cloud_core::state::SharedState;
 pub mod admin;
 pub mod chat;
 pub mod checklist;
+pub mod checklist_text;
+pub mod comments;
 pub mod compact;
 pub mod digest;
 pub mod geometry;
 mod http;
+pub mod jsstr;
 pub mod mentions;
 pub mod ops;
 pub mod read;
@@ -36,6 +39,9 @@ mod room;
 pub mod schema;
 pub mod shape;
 pub mod store;
+pub mod timeline;
+pub mod timeline_layout;
+pub mod timeline_text;
 mod ws;
 
 pub use rest::{
@@ -69,7 +75,7 @@ pub mod api {
 }
 
 /// Capabilities this crate adds to `GET /v1/info` `features`.
-pub const FEATURES: &[&str] = &["canvases", "mentions", "share_links", "people"];
+pub const FEATURES: &[&str] = &["canvases", "mentions", "share_links", "people", "ops_v2"];
 pub use admin::{canvases_deleted, disconnect_user, owned_canvases};
 pub use room::{
     close_all_rooms, evict_room_now, open_rooms, room_in_memory, rooms_metrics, RoomsMetrics,

@@ -69,6 +69,7 @@ base64 = "0.22"
 hex = "0.4"
 bytes = "1"
 url = "2"
+regex = "1"
 # yrs ≥ 0.18 ships the y-sync protocol (DefaultProtocol, Awareness, sync::Message) as
 # `yrs::sync`; the standalone `y-sync` crate is frozen on yrs 0.17.
 yrs = { version = "0.28", features = ["sync"] }

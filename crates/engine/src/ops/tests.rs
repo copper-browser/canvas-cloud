@@ -6,6 +6,7 @@ use yrs::{Doc, GetString, ReadTxn, Transact};
 
 fn ctx() -> OpsCtx {
     OpsCtx {
+        people: Vec::new(),
         by: "tester".into(),
         by_id: "u-tester".into(),
         now_ms: 1_000,
@@ -590,8 +591,48 @@ fn pick_keys(doc: &Doc, id: &str) -> usize {
         .count()
 }
 
+/// A checklist as 0.1.0 (and older Coppers) wrote it: its own type, rows and columns as
+/// props, picks under `pick:<rowId>`.
+fn seed_legacy(doc: &Doc, id: &str, columns: &[&str], rows: &[(&str, &str)]) {
+    let shapes = doc.get_or_insert_map("shapes");
+    let mut txn = doc.transact_mut();
+    let m = shapes.insert(&mut txn, id, yrs::MapPrelim::default());
+    let rows: Vec<Value> = rows
+        .iter()
+        .map(|(id, label)| json!({ "id": id, "label": label }))
+        .collect();
+    let height = crate::checklist::checklist_height(columns.len(), rows.len(), 0);
+    for (k, v) in [
+        ("id", json!(id)),
+        ("type", json!("checklist")),
+        ("x", json!(0)),
+        ("y", json!(0)),
+        ("w", json!(324)),
+        ("h", json!(height)),
+        ("color", json!("green")),
+        ("z", json!(1)),
+        ("title", json!("Old")),
+        ("columns", json!(columns)),
+        ("rows", Value::Array(rows)),
+    ] {
+        m.insert(&mut txn, k, crate::schema::json_to_any(&v));
+    }
+}
+
+fn text_of(doc: &Doc, id: &str) -> String {
+    let shapes = doc.get_or_insert_map("shapes");
+    let txn = doc.transact();
+    let Some(Out::YMap(m)) = shapes.get(&txn, id) else {
+        panic!("no shape {id}")
+    };
+    match m.get(&txn, "text") {
+        Some(Out::YText(t)) => t.get_string(&txn),
+        other => panic!("text is not a Y.Text: {other:?}"),
+    }
+}
+
 #[test]
-fn checklist_add_with_defaults_rows_picks_and_size() {
+fn checklist_add_makes_a_card() {
     let doc = Doc::new();
     let r = run(
         &doc,
@@ -600,27 +641,33 @@ fn checklist_add_with_defaults_rows_picks_and_size() {
     );
     assert!(r.errors.is_empty(), "{:?}", r.errors);
     let s = shape(&doc, "tue");
-    assert_eq!(s["type"], "checklist");
-    assert_eq!(s["title"], "Tue");
+    assert_eq!(s["type"], "sticky");
+    assert_eq!(s["view"], "checklist");
     assert_eq!(s["columns"], json!(["Yes", "No"]));
     assert_eq!(s["color"], "green");
     assert_eq!(s["w"], 324);
     assert_eq!(s["h"], 49 + 28 + 34 * 3 + 14);
     assert_eq!(s["by"], "tester");
-    assert_eq!(s["rows"][2], json!({ "id": "cy", "label": "Cy" }));
+    assert!(s.get("title").is_none() && s.get("rows").is_none());
     assert_eq!(
-        s["pick:cy"],
+        text_of(&doc, "tue"),
+        "### Tue\n- [x] Ann · Yes\n- [ ] Bob\n- [x] Cy · No"
+    );
+    assert_eq!(
+        s["who:cy"],
         json!({ "col": "No", "by": "tester", "byId": "u-tester", "at": 1000 })
     );
     let read = read_one(&doc, "tue");
+    assert_eq!(read["type"], "sticky");
+    assert_eq!(read["view"], "checklist");
+    assert_eq!(read["title"], "Tue");
     assert_eq!(picks(&read), [json!("Yes"), Value::Null, json!("No")]);
     assert_eq!(read["tally"], json!({ "Yes": 1, "No": 1 }));
-    assert_eq!(read["rows"][0]["by"], "tester");
-    assert_eq!(read["rows"][0]["at"], 1000);
     assert_eq!(
-        read["rows"][1],
-        json!({ "id": read["rows"][1]["id"], "label": "Bob", "pick": null })
+        read["rows"][0],
+        json!({ "label": "Ann", "pick": "Yes", "by": "tester", "at": 1000 })
     );
+    assert_eq!(read["rows"][1], json!({ "label": "Bob", "pick": null }));
     assert!(read.get("picks").is_none());
 }
 
@@ -635,6 +682,7 @@ fn checklist_one_column_is_a_todo_list() {
     let s = shape(&doc, "todo");
     assert_eq!(s["w"], 280);
     assert_eq!(s["h"], 49 + 34 + 14);
+    assert_eq!(text_of(&doc, "todo"), "- [x] Book table");
     let read = read_one(&doc, "todo");
     assert_eq!(read["rows"][0]["pick"], "Done");
     assert_eq!(read["tally"], json!({ "Done": 1 }));
@@ -649,12 +697,14 @@ fn checklist_bad_input_fails_the_whole_add() {
             { "op": "add", "shape": { "type": "checklist", "rows": ["Ann"], "picks": { "Ann": "Maybe" } } },
             { "op": "add", "shape": { "type": "checklist", "columns": ["A", "B", "C", "D", "E"] } },
             { "op": "add", "shape": { "type": "checklist", "rows": "Ann" } },
-            { "op": "add", "shape": { "type": "checklist", "rows": ["Ann"], "fontSize": 20 } }
+            { "op": "add", "shape": { "type": "checklist", "rows": ["Ann"], "fontSize": 20 } },
+            { "op": "add", "shape": { "type": "checklist", "rows": ["Ann"], "notes": { "Bo": "x" } } },
+            { "op": "add", "shape": { "type": "sticky", "view": "checklist", "text": "- [ ] a", "rows": ["b"] } }
         ]),
     );
     assert_eq!(r.applied, 0);
     let at: Vec<i64> = r.errors.iter().map(|e| e.index).collect();
-    assert_eq!(at, [0, 1, 2, 3]);
+    assert_eq!(at, [0, 1, 2, 3, 4, 5]);
     assert_eq!(r.errors[0].error, "`picks`: no column \"Maybe\" (Yes, No)");
     assert!(
         r.errors[3].error.contains("unknown prop `fontSize`"),
@@ -665,22 +715,38 @@ fn checklist_bad_input_fails_the_whole_add() {
 }
 
 #[test]
-fn checklist_update_picks_one_row_at_a_time() {
+fn checklist_update_picks_notes_and_assignees() {
     let doc = Doc::new();
     run(
         &doc,
         json!([{ "op": "add", "shape": { "type": "checklist", "id": "c", "rows": ["Ann", "Bob", "Cy"],
             "picks": { "Ann": "Yes", "Bob": "No" } } }]),
     );
+    let h0 = shape(&doc, "c")["h"].as_f64().unwrap();
     let r = run(
         &doc,
-        json!([{ "op": "update", "id": "c", "patch": { "picks": { "Ann": null, "Cy": "yes" } } }]),
+        json!([{ "op": "update", "id": "c", "patch": { "picks": { "Ann": null, "Cy": "yes" },
+            "notes": { "Bob": "back at 6" }, "assignees": { "Cy": ["Grace Hopper"] } } }]),
     );
     assert!(r.errors.is_empty(), "{:?}", r.errors);
+    assert_eq!(
+        text_of(&doc, "c"),
+        "- [ ] Ann\n- [x] Bob · No\n  > back at 6\n- [x] Cy · Yes\n  @Grace Hopper"
+    );
     let read = read_one(&doc, "c");
     assert_eq!(picks(&read), [Value::Null, json!("No"), json!("Yes")]);
     assert_eq!(read["tally"], json!({ "Yes": 1, "No": 1 }));
-    assert_eq!(pick_keys(&doc, "c"), 2);
+    assert_eq!(read["rows"][1]["note"], "back at 6");
+    assert_eq!(read["rows"][1]["noteBy"], "tester");
+    assert_eq!(
+        read["rows"][2]["assignees"],
+        json!([{ "name": "Grace Hopper" }])
+    );
+    let s = shape(&doc, "c");
+    assert!(s.get("who:ann").is_none());
+    assert_eq!(s["noteBy:bob"]["by"], "tester");
+    assert_eq!(s["assignees:cy"][0]["name"], "Grace Hopper");
+    assert_eq!(s["h"].as_f64().unwrap(), h0 + 22.0);
 }
 
 #[test]
@@ -691,14 +757,13 @@ fn checklist_rows_keep_their_picks_and_columns_drop_theirs() {
         json!([{ "op": "add", "shape": { "type": "checklist", "id": "c", "rows": ["Ann", "Bob"],
             "picks": { "Ann": "Yes", "Bob": "No" } } }]),
     );
-    let ann = shape(&doc, "c")["rows"][0]["id"].clone();
-    run(
+    let r = run(
         &doc,
         json!([{ "op": "update", "id": "c", "patch": { "rows": ["Bob", "Dee", "Ann"],
             "columns": ["Yes", "No", "Maybe"], "picks": { "Dee": "maybe" } } }]),
     );
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
     let s = shape(&doc, "c");
-    assert_eq!(s["rows"][2]["id"], ann);
     assert_eq!(s["columns"], json!(["Yes", "No", "Maybe"]));
     assert_eq!(s["w"], 14 * 2 + 168 + 64 * 3);
     assert_eq!(s["h"], 49 + 28 + 34 * 3 + 14);
@@ -711,13 +776,7 @@ fn checklist_rows_keep_their_picks_and_columns_drop_theirs() {
         json!([{ "op": "update", "id": "c", "patch": { "columns": ["Yes", "Maybe"], "rows": ["Bob", "Dee"] } }]),
     );
     assert_eq!(picks(&read_one(&doc, "c")), [Value::Null, json!("Maybe")]);
-    assert_eq!(pick_keys(&doc, "c"), 1);
-    // A column renamed only in case keeps its picks, under the new spelling.
-    run(
-        &doc,
-        json!([{ "op": "update", "id": "c", "patch": { "columns": ["Yes", "MAYBE"] } }]),
-    );
-    assert_eq!(picks(&read_one(&doc, "c")), [Value::Null, json!("MAYBE")]);
+    assert!(shape(&doc, "c").get("who:ann").is_none());
 }
 
 #[test]
@@ -727,12 +786,19 @@ fn checklist_update_errors_change_nothing() {
         &doc,
         json!([{ "op": "add", "shape": { "type": "checklist", "id": "c", "title": "T", "rows": ["Ann"] } }]),
     );
+    let before = shape(&doc, "c");
     let r = run(
         &doc,
-        json!([{ "op": "update", "id": "c", "patch": { "title": "New", "picks": { "Zed": "Yes" } } }]),
+        json!([
+            { "op": "update", "id": "c", "patch": { "title": "New", "picks": { "Zed": "Yes" } } },
+            { "op": "update", "id": "c", "patch": { "rows": ["A"], "notes": { "Ann": "x" } } },
+            { "op": "update", "id": "c", "patch": { "w": 400, "assignees": { "Ann": [""] } } }
+        ]),
     );
+    assert_eq!(r.applied, 0, "{r:?}");
     assert_eq!(r.errors[0].error, "`picks`: no row \"Zed\"");
-    assert_eq!(shape(&doc, "c")["title"], "T");
+    assert_eq!(read_one(&doc, "c")["title"], "T");
+    assert_eq!(shape(&doc, "c"), before);
 }
 
 #[test]
@@ -757,8 +823,35 @@ fn checklist_moves_resizes_with_a_floor_and_takes_text_as_title() {
         ),
         (json!(10), json!(20), json!(200), json!(72))
     );
-    assert_eq!(shape(&doc, "d")["title"], "Wed dinner");
+    assert_eq!(read_one(&doc, "d")["title"], "Wed dinner");
     assert_eq!(read_one(&doc, "d")["columns"], json!(["Yes", "No"]));
+}
+
+#[test]
+fn checklist_view_turns_on_and_off() {
+    let doc = Doc::new();
+    run(
+        &doc,
+        json!([{ "op": "add", "shape": { "type": "sticky", "id": "n", "x": 0, "y": 0, "text": "### Chores\n- [ ] Dishes\n- [x] Bins" } }]),
+    );
+    let r = run(
+        &doc,
+        json!([{ "op": "update", "id": "n", "patch": { "view": "checklist" } }]),
+    );
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+    let read = read_one(&doc, "n");
+    assert_eq!(read["view"], "checklist");
+    assert_eq!(read["title"], "Chores");
+    assert_eq!(read["columns"], json!(["Done"]));
+    assert_eq!(picks(&read), [Value::Null, json!("Done")]);
+    assert_eq!(text_of(&doc, "n"), "### Chores\n- [ ] Dishes\n- [x] Bins");
+    let r = run(
+        &doc,
+        json!([{ "op": "update", "id": "n", "patch": { "view": null } }]),
+    );
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+    assert!(shape(&doc, "n").get("view").is_none());
+    assert!(read_one(&doc, "n").get("rows").is_none());
 }
 
 #[test]
@@ -766,7 +859,7 @@ fn checklist_concurrent_picks_on_different_rows_both_stick() {
     let a = Doc::with_client_id(1);
     run(
         &a,
-        json!([{ "op": "add", "shape": { "type": "checklist", "id": "c", "rows": [{"label": "Ann", "id": "ann"}, {"label": "Bob", "id": "bob"}] } }]),
+        json!([{ "op": "add", "shape": { "type": "checklist", "id": "c", "rows": ["Ann", "Bob"] } }]),
     );
     let b = Doc::with_client_id(2);
     let full = a
@@ -778,11 +871,11 @@ fn checklist_concurrent_picks_on_different_rows_both_stick() {
     // Both write before either hears from the other.
     run(
         &a,
-        json!([{ "op": "update", "id": "c", "patch": { "picks": { "ann": "Yes" } } }]),
+        json!([{ "op": "update", "id": "c", "patch": { "picks": { "Ann": "Yes" } } }]),
     );
     run(
         &b,
-        json!([{ "op": "update", "id": "c", "patch": { "picks": { "bob": "No" } } }]),
+        json!([{ "op": "update", "id": "c", "patch": { "picks": { "Bob": "No" } } }]),
     );
     let ua = a
         .transact()
@@ -799,4 +892,70 @@ fn checklist_concurrent_picks_on_different_rows_both_stick() {
     for d in [&a, &b] {
         assert_eq!(picks(&read_one(d, "c")), [json!("Yes"), json!("No")]);
     }
+}
+
+#[test]
+fn legacy_checklist_still_updates_in_place() {
+    let doc = Doc::new();
+    seed_legacy(&doc, "c", &["Yes", "No"], &[("ann", "Ann"), ("bob", "Bob")]);
+    let r = run(
+        &doc,
+        json!([{ "op": "update", "id": "c", "patch": { "picks": { "ann": "Yes" },
+            "notes": { "Bob": "late" }, "assignees": { "Ann": ["Grace"] } } }]),
+    );
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+    let s = shape(&doc, "c");
+    assert_eq!(s["type"], "checklist");
+    assert!(s.get("view").is_none() && s.get("text").is_none());
+    assert_eq!(
+        s["pick:ann"],
+        json!({ "col": "Yes", "by": "tester", "byId": "u-tester", "at": 1000 })
+    );
+    assert_eq!(s["note:bob"]["text"], "late");
+    assert_eq!(s["assignees:ann"][0]["name"], "Grace");
+    let read = read_one(&doc, "c");
+    assert_eq!(read["type"], "checklist");
+    assert_eq!(read["title"], "Old");
+    assert_eq!(
+        read["rows"][0],
+        json!({ "id": "ann", "label": "Ann", "pick": "Yes", "by": "tester", "at": 1000,
+            "assignees": [{ "name": "Grace" }] })
+    );
+    assert_eq!(read["rows"][1]["note"], "late");
+    assert_eq!(read["rows"][1]["pick"], Value::Null);
+}
+
+#[test]
+fn legacy_checklist_rows_and_columns() {
+    let doc = Doc::new();
+    seed_legacy(&doc, "c", &["Yes", "No"], &[("ann", "Ann"), ("bob", "Bob")]);
+    run(
+        &doc,
+        json!([{ "op": "update", "id": "c", "patch": { "picks": { "Ann": "Yes", "Bob": "No" } } }]),
+    );
+    run(
+        &doc,
+        json!([{ "op": "update", "id": "c", "patch": { "rows": ["Bob", "Dee", "Ann"],
+            "columns": ["Yes", "No", "Maybe"], "picks": { "Dee": "maybe" } } }]),
+    );
+    let s = shape(&doc, "c");
+    assert_eq!(s["rows"][2]["id"], "ann");
+    assert_eq!(s["w"], 14 * 2 + 168 + 64 * 3);
+    assert_eq!(s["h"], 49 + 28 + 34 * 3 + 14);
+    assert_eq!(
+        picks(&read_one(&doc, "c")),
+        [json!("No"), json!("Maybe"), json!("Yes")]
+    );
+    run(
+        &doc,
+        json!([{ "op": "update", "id": "c", "patch": { "columns": ["Yes", "Maybe"], "rows": ["Bob", "Dee"] } }]),
+    );
+    assert_eq!(picks(&read_one(&doc, "c")), [Value::Null, json!("Maybe")]);
+    assert_eq!(pick_keys(&doc, "c"), 1);
+    let r = run(
+        &doc,
+        json!([{ "op": "update", "id": "c", "patch": { "title": "New", "picks": { "Zed": "Yes" } } }]),
+    );
+    assert_eq!(r.errors[0].error, "`picks`: no row \"Zed\"");
+    assert_eq!(shape(&doc, "c")["title"], "Old");
 }
