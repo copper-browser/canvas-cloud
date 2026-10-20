@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Canvas Cloud API",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "summary": "Collaborative canvases: REST, live Yjs rooms, accounts, linked apps and agent seams.",
     "description": "Every route of a Canvas Cloud server. All `/v1` routes speak JSON; errors are always `{\"error\": \"<code>\", \"message\": \"…\"}` (409 conflicts may carry extra fields). Authenticate with `Authorization: Bearer <credential>`: a session token (`cvs_…`), a personal access token (`cvt_…`; read-scoped tokens may only GET/HEAD and never join a live room — `403 read_only_token`), or a linked-app key (`cva_…`) plus `X-Canvas-User: <subject>` to act as one of the app's users (without that header an app key is accepted only on `/v1/apps/self/*`). WebSocket upgrades and `text/event-stream` GETs may pass the credential as `?token=` instead. In canvas routes `{id}` is a canvas UUID or the literal `personal` (the caller's Personal canvas, created on first use). A canvas the caller is not a member of is indistinguishable from one that does not exist (`404`). Agents can also use the MCP endpoint (`POST /mcp`) and the plain-text guide at `/llms.txt`.",
     "license": { "name": "MIT", "identifier": "MIT" }
