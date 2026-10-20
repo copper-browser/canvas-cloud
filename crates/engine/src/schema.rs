@@ -121,9 +121,22 @@ impl ShapeType {
             Self::Image => &[
                 "x", "y", "w", "h", "color", "z", "src", "naturalW", "naturalH",
             ],
-            Self::Link => &["x", "y", "w", "h", "color", "z", "url", "title", "favicon"],
+            Self::Link => &[
+                "x", "y", "w", "h", "color", "z", "url", "title", "favicon", "live",
+            ],
             Self::Checklist => &[
-                "x", "y", "w", "h", "color", "z", "title", "columns", "rows", "picks",
+                "x",
+                "y",
+                "w",
+                "h",
+                "color",
+                "z",
+                "title",
+                "columns",
+                "rows",
+                "picks",
+                "notes",
+                "assignees",
             ],
         }
     }
@@ -132,6 +145,7 @@ impl ShapeType {
     pub fn alias(self, key: &str) -> &str {
         match (self, key) {
             (Self::Frame | Self::Link | Self::Checklist, "text" | "label") => "title",
+            (Self::Link, "embed") => "live",
             (Self::Arrow, "text" | "title") => "label",
             (Self::Sticky | Self::Text, "title") => "text",
             _ => key,

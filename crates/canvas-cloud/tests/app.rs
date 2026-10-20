@@ -413,10 +413,9 @@ async fn delegated_sign_in_end_to_end() {
         "start_url": "https://portal.example.test/canvas-signin",
     });
     assert_eq!(v["auth"]["oidc"], json!([portal]));
-    assert!(v["features"]
-        .as_array()
-        .unwrap()
-        .contains(&json!("app_sessions")));
+    let features = v["features"].as_array().unwrap();
+    assert!(features.contains(&json!("app_sessions")), "{features:?}");
+    assert!(features.contains(&json!("ops_v2")), "{features:?}");
     let (_, v) = call(&app, Method::GET, "/v1/auth/oidc", None).await;
     assert_eq!(v["providers"], json!([portal]));
 

@@ -1,0 +1,335 @@
+{
+ "name": "comments",
+ "now": 1790000000000,
+ "by": "Planner",
+ "byId": "agent:planner",
+ "people": [
+  {
+   "id": "u-grace",
+   "name": "Grace Hopper",
+   "email": "grace@example.com"
+  },
+  {
+   "id": "u-ada",
+   "name": "Ada Lovelace",
+   "email": "ada@example.com"
+  }
+ ],
+ "seed": {},
+ "steps": [
+  {
+   "ops": [
+    {
+     "op": "add",
+     "shape": {
+      "id": "s",
+      "type": "sticky",
+      "x": 0,
+      "y": 0,
+      "text": "Ship it?\nsecond line"
+     }
+    },
+    {
+     "op": "add",
+     "shape": {
+      "id": "f",
+      "type": "frame",
+      "x": 400,
+      "y": 0,
+      "title": "Slide 1"
+     }
+    },
+    {
+     "op": "comment",
+     "on": "s",
+     "text": "  Looks good\r\nto me  ",
+     "id": "th1"
+    },
+    {
+     "op": "comment",
+     "on": "shape:f",
+     "text": "Title?",
+     "id": "th2"
+    },
+    {
+     "op": "comment",
+     "on": "nope",
+     "text": "x"
+    },
+    {
+     "op": "comment",
+     "on": "s",
+     "text": "   "
+    },
+    {
+     "op": "comment",
+     "on": "s",
+     "text": "dup",
+     "id": "th1"
+    }
+   ],
+   "applied": 4,
+   "ids": [
+    "s",
+    "f",
+    "th1",
+    "th2",
+    null,
+    null,
+    null
+   ],
+   "errors": [
+    {
+     "index": 4,
+     "error": "no shape nope"
+    },
+    {
+     "index": 5,
+     "error": "`text` is empty"
+    },
+    {
+     "index": 6,
+     "error": "a comment thread with id th1 already exists"
+    }
+   ]
+  },
+  {
+   "ops": [
+    {
+     "op": "reply",
+     "thread": "th1",
+     "text": "Agreed"
+    },
+    {
+     "op": "resolve",
+     "thread": "comment:th1"
+    },
+    {
+     "op": "resolve",
+     "thread": "th2",
+     "resolved": true
+    },
+    {
+     "op": "reply",
+     "thread": "missing",
+     "text": "x"
+    }
+   ],
+   "applied": 3,
+   "ids": [
+    "th1",
+    "th1",
+    "th2",
+    null
+   ],
+   "errors": [
+    {
+     "index": 3,
+     "error": "no comment thread missing"
+    }
+   ]
+  },
+  {
+   "ops": [
+    {
+     "op": "reply",
+     "thread": "th2",
+     "text": "Reopening"
+    },
+    {
+     "op": "resolve",
+     "thread": "th1",
+     "resolved": false
+    },
+    {
+     "op": "delete",
+     "id": "f"
+    }
+   ],
+   "applied": 3,
+   "ids": [
+    "th2",
+    "th1",
+    "f"
+   ],
+   "errors": []
+  }
+ ],
+ "doc": {
+  "shapes": {
+   "Y.Map": {
+    "s": {
+     "Y.Map": {
+      "by": "Planner",
+      "color": "yellow",
+      "createdAt": {
+       "f64": 1790000000000
+      },
+      "h": {
+       "i": 200
+      },
+      "id": "s",
+      "text": {
+       "Y.Text": "Ship it?\nsecond line"
+      },
+      "type": "sticky",
+      "updatedAt": {
+       "f64": 1790000000000
+      },
+      "w": {
+       "i": 200
+      },
+      "x": {
+       "i": 0
+      },
+      "y": {
+       "i": 0
+      },
+      "z": {
+       "i": 1
+      }
+     }
+    }
+   }
+  },
+  "comments": {
+   "Y.Map": {
+    "th1": {
+     "Y.Map": {
+      "anchor": "s",
+      "anchorName": "Ship it?",
+      "at": {
+       "f64": 1790000000000
+      },
+      "by": "Planner",
+      "byId": "agent:planner",
+      "id": "th1",
+      "messages": {
+       "Y.Array": [
+        {
+         "Y.Map": {
+          "at": {
+           "f64": 1790000000000
+          },
+          "by": "Planner",
+          "byId": "agent:planner",
+          "id": "0080b6c5-b106-463e-8f49-88b29b1ecb18",
+          "text": "Looks good\nto me"
+         }
+        },
+        {
+         "Y.Map": {
+          "at": {
+           "f64": 1790000000000
+          },
+          "by": "Planner",
+          "byId": "agent:planner",
+          "id": "028660e4-e791-461c-8adf-fd7ea8fd49c0",
+          "text": "Agreed"
+         }
+        }
+       ]
+      },
+      "resolved": false
+     }
+    },
+    "th2": {
+     "Y.Map": {
+      "anchor": "f",
+      "anchorName": "Slide 1",
+      "at": {
+       "f64": 1790000000000
+      },
+      "by": "Planner",
+      "byId": "agent:planner",
+      "id": "th2",
+      "messages": {
+       "Y.Array": [
+        {
+         "Y.Map": {
+          "at": {
+           "f64": 1790000000000
+          },
+          "by": "Planner",
+          "byId": "agent:planner",
+          "id": "5801cd10-e763-4584-a4f7-c8d683237390",
+          "text": "Title?"
+         }
+        },
+        {
+         "Y.Map": {
+          "at": {
+           "f64": 1790000000000
+          },
+          "by": "Planner",
+          "byId": "agent:planner",
+          "id": "0a7108a7-eba5-4fd8-a242-a91b53211290",
+          "text": "Reopening"
+         }
+        }
+       ]
+      },
+      "resolved": false
+     }
+    }
+   }
+  }
+ },
+ "read": {
+  "shapes": [
+   {
+    "id": "s",
+    "type": "sticky",
+    "x": 0,
+    "y": 0,
+    "w": 200,
+    "h": 200,
+    "color": "yellow",
+    "z": 1,
+    "by": "Planner",
+    "text": "Ship it?\nsecond line"
+   }
+  ],
+  "comments": [
+   {
+    "id": "th1",
+    "anchor": "s",
+    "resolved": false,
+    "messages": [
+     {
+      "id": "0080b6c5-b106-463e-8f49-88b29b1ecb18",
+      "by": "Planner",
+      "at": 1790000000000,
+      "text": "Looks good\nto me"
+     },
+     {
+      "id": "028660e4-e791-461c-8adf-fd7ea8fd49c0",
+      "by": "Planner",
+      "at": 1790000000000,
+      "text": "Agreed"
+     }
+    ]
+   },
+   {
+    "id": "th2",
+    "anchor": "f",
+    "resolved": false,
+    "messages": [
+     {
+      "id": "5801cd10-e763-4584-a4f7-c8d683237390",
+      "by": "Planner",
+      "at": 1790000000000,
+      "text": "Title?"
+     },
+     {
+      "id": "0a7108a7-eba5-4fd8-a242-a91b53211290",
+      "by": "Planner",
+      "at": 1790000000000,
+      "text": "Reopening"
+     }
+    ],
+    "anchorDeleted": true
+   }
+  ]
+ }
+}

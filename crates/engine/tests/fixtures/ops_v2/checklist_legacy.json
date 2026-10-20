@@ -1,0 +1,319 @@
+{
+ "name": "checklist_legacy",
+ "now": 1790000000000,
+ "by": "Planner",
+ "byId": "agent:planner",
+ "people": [
+  {
+   "id": "u-grace",
+   "name": "Grace Hopper",
+   "email": "grace@example.com"
+  },
+  {
+   "id": "u-ada",
+   "name": "Ada Lovelace",
+   "email": "ada@example.com"
+  }
+ ],
+ "seed": {
+  "old": {
+   "id": "old",
+   "type": "checklist",
+   "x": 0,
+   "y": 600,
+   "w": 324,
+   "h": 193,
+   "color": "green",
+   "z": 1,
+   "title": "Old",
+   "columns": [
+    "Yes",
+    "No"
+   ],
+   "rows": [
+    {
+     "id": "ann",
+     "label": "Ann"
+    },
+    {
+     "id": "bob",
+     "label": "Bob"
+    },
+    {
+     "id": "cy",
+     "label": "Cy"
+    }
+   ],
+   "createdAt": 1789999999000,
+   "updatedAt": 1789999999000
+  }
+ },
+ "steps": [
+  {
+   "ops": [
+    {
+     "op": "update",
+     "id": "old",
+     "patch": {
+      "picks": {
+       "ann": "Yes",
+       "Bob": "no"
+      },
+      "notes": {
+       "cy": "maybe later"
+      },
+      "assignees": {
+       "Ann": [
+        "grace",
+        "Ada Lovelace"
+       ]
+      }
+     }
+    }
+   ],
+   "applied": 1,
+   "ids": [
+    "old"
+   ],
+   "errors": []
+  },
+  {
+   "ops": [
+    {
+     "op": "update",
+     "id": "old",
+     "patch": {
+      "rows": [
+       "Bob",
+       {
+        "label": "Dee",
+        "id": "dee"
+       },
+       "Ann"
+      ],
+      "columns": [
+       "Yes",
+       "No",
+       "Maybe"
+      ],
+      "picks": {
+       "Dee": "maybe"
+      },
+      "title": "Older"
+     }
+    },
+    {
+     "op": "update",
+     "id": "old",
+     "patch": {
+      "picks": {
+       "Zed": "Yes"
+      }
+     }
+    }
+   ],
+   "applied": 1,
+   "ids": [
+    "old",
+    null
+   ],
+   "errors": [
+    {
+     "index": 1,
+     "error": "`picks`: no row \"Zed\""
+    }
+   ]
+  },
+  {
+   "ops": [
+    {
+     "op": "update",
+     "id": "old",
+     "patch": {
+      "columns": [
+       "Yes",
+       "Maybe"
+      ],
+      "notes": {
+       "Bob": "x"
+      }
+     }
+    },
+    {
+     "op": "resize",
+     "id": "old",
+     "w": 10,
+     "h": 10
+    }
+   ],
+   "applied": 2,
+   "ids": [
+    "old",
+    "old"
+   ],
+   "errors": []
+  }
+ ],
+ "doc": {
+  "shapes": {
+   "Y.Map": {
+    "old": {
+     "Y.Map": {
+      "assignees:ann": [
+       {
+        "at": {
+         "f64": 1790000000000
+        },
+        "by": "Planner",
+        "byId": "agent:planner",
+        "email": "grace@example.com",
+        "id": "u-grace",
+        "name": "Grace Hopper"
+       },
+       {
+        "at": {
+         "f64": 1790000000000
+        },
+        "by": "Planner",
+        "byId": "agent:planner",
+        "email": "ada@example.com",
+        "id": "u-ada",
+        "name": "Ada Lovelace"
+       }
+      ],
+      "color": "green",
+      "columns": [
+       "Yes",
+       "Maybe"
+      ],
+      "createdAt": {
+       "f64": 1789999999000
+      },
+      "h": {
+       "i": 72
+      },
+      "id": "old",
+      "note:bob": {
+       "at": {
+        "f64": 1790000000000
+       },
+       "by": "Planner",
+       "byId": "agent:planner",
+       "text": "x"
+      },
+      "pick:ann": {
+       "at": {
+        "f64": 1790000000000
+       },
+       "by": "Planner",
+       "byId": "agent:planner",
+       "col": "Yes"
+      },
+      "pick:dee": {
+       "at": {
+        "f64": 1790000000000
+       },
+       "by": "Planner",
+       "byId": "agent:planner",
+       "col": "Maybe"
+      },
+      "rows": [
+       {
+        "id": "bob",
+        "label": "Bob"
+       },
+       {
+        "id": "dee",
+        "label": "Dee"
+       },
+       {
+        "id": "ann",
+        "label": "Ann"
+       }
+      ],
+      "title": "Older",
+      "type": "checklist",
+      "updatedAt": {
+       "f64": 1790000000000
+      },
+      "w": {
+       "i": 200
+      },
+      "x": {
+       "i": 0
+      },
+      "y": {
+       "i": 600
+      },
+      "z": {
+       "i": 1
+      }
+     }
+    }
+   }
+  },
+  "comments": {
+   "Y.Map": {}
+  }
+ },
+ "read": {
+  "shapes": [
+   {
+    "id": "old",
+    "type": "checklist",
+    "x": 0,
+    "y": 600,
+    "w": 200,
+    "h": 72,
+    "color": "green",
+    "z": 1,
+    "title": "Older",
+    "columns": [
+     "Yes",
+     "Maybe"
+    ],
+    "rows": [
+     {
+      "id": "bob",
+      "label": "Bob",
+      "pick": null,
+      "note": "x",
+      "noteBy": "Planner",
+      "noteAt": 1790000000000
+     },
+     {
+      "id": "dee",
+      "label": "Dee",
+      "pick": "Maybe",
+      "by": "Planner",
+      "at": 1790000000000
+     },
+     {
+      "id": "ann",
+      "label": "Ann",
+      "pick": "Yes",
+      "by": "Planner",
+      "at": 1790000000000,
+      "assignees": [
+       {
+        "name": "Grace Hopper",
+        "id": "u-grace",
+        "email": "grace@example.com"
+       },
+       {
+        "name": "Ada Lovelace",
+        "id": "u-ada",
+        "email": "ada@example.com"
+       }
+      ]
+     }
+    ],
+    "tally": {
+     "Yes": 1,
+     "Maybe": 1
+    }
+   }
+  ],
+  "comments": []
+ }
+}

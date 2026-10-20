@@ -9,11 +9,21 @@
 //! {op:"delete", id}                                          // arrows ending on it go too
 //! {op:"connect", from:id, to:id, label?, color?, fromSide?, toSide?, id?}
 //! {op:"clear", confirm:true}                                 // server: needs confirmation
+//! {op:"comment", on:shapeId, text, id?}                      // ids[i]: the new thread's id
+//! {op:"reply", thread, text}                                 // reopens a resolved thread
+//! {op:"resolve", thread, resolved?}                          // resolved defaults to true
 //! ```
 //!
-//! A checklist (`crate::checklist`) takes `title`, `columns` (1–4, default Yes/No), `rows`
-//! (labels or `{label, id?}`, ≤ 60) and `picks` (`{rowIdOrLabel: column | true | null}`)
-//! on add and update; `rows` and `columns` replace the lists.
+//! Rich shapes (`ops_v2`):
+//!
+//! - `{type:"checklist", title?, columns?, rows?, picks?, notes?, assignees?}` creates the
+//!   checklist **card**: a sticky with `view:"checklist"` whose text is the list
+//!   (`crate::checklist_text`), so older clients show it as a note with task boxes. A
+//!   legacy `type:"checklist"` shape (columns/rows props) still reads and updates.
+//! - `{type:"timeline", title?, start?, end?, step?, items?}` creates a sticky with
+//!   `view:"timeline"` (`crate::timeline_text`); an update also takes `addItems` and
+//!   `editItems`.
+//! - `{type:"link", live:true}` (or `type:"web"`) is a live web frame (960×640, http(s)).
 //!
 //! A failing op changes nothing and is reported in `errors`; the rest still apply.
 //! `ids[i]` is the id op `i` created or touched (`null` when it failed, and for `clear`).
@@ -24,18 +34,19 @@ use serde::Serialize;
 use serde_json::{json, Map as JsonMap, Value};
 use yrs::{Any, GetString, Map, MapPrelim, MapRef, Out, Text, TextPrelim, TextRef, TransactionMut};
 
-use crate::checklist::{
-    checklist_height, checklist_width, clean_columns, clean_picks, clean_rows, write_checklist,
-    ChecklistInput, Picker, Row, DEFAULT_COLUMNS,
-};
+mod comment_ops;
+mod note_ops;
+mod timeline_ops;
+
+use crate::checklist::{clean_columns, clean_rows, LegacyPlan, Person, Picker, Row};
 use crate::geometry::{center, contains_box, find_free_spot, js_round, BoxF, Point, Side};
 use crate::schema::{
     color_for, is_valid_color, jnum, js_len, js_slice, json_f64, json_to_any, ShapeType,
     AGENT_STATUSES, MAX_DATA_URL, MAX_TEXT, MAX_TITLE,
 };
 use crate::shape::{
-    all_shapes, arrow_mid, bare_id, box_lookup, live_shape, max_z, store_value, Endpoint, ImageRef,
-    Shape,
+    all_shapes, arrow_mid, bare_id, box_lookup, frame_url, live_shape, max_z, min_size_for,
+    store_value, Endpoint, ImageRef, Shape, View, LIVE_SIZE,
 };
 
 /// Most ops accepted in one call (as on the page).
@@ -80,6 +91,18 @@ pub enum Op {
     },
     Clear {
         confirm: bool,
+    },
+    /// `{op:"comment", on, text, id?}` (kept whole: `on` has aliases).
+    Comment {
+        op: JsonMap<String, Value>,
+    },
+    /// `{op:"reply", thread, text}`.
+    Reply {
+        op: JsonMap<String, Value>,
+    },
+    /// `{op:"resolve", thread, resolved?}`.
+    Resolve {
+        op: JsonMap<String, Value>,
     },
 }
 
@@ -157,8 +180,11 @@ impl Op {
             Some("clear") => Ok(Op::Clear {
                 confirm: o.get("confirm") == Some(&Value::Bool(true)),
             }),
+            Some("comment") => Ok(Op::Comment { op: o.clone() }),
+            Some("reply") => Ok(Op::Reply { op: o.clone() }),
+            Some("resolve") => Ok(Op::Resolve { op: o.clone() }),
             _ => Err(format!(
-                "unknown op {} (add, update, move, resize, delete, connect, clear)",
+                "unknown op {} (add, update, move, resize, delete, connect, clear, comment, reply, resolve)",
                 o.get("op").unwrap_or(&Value::Null)
             )),
         }
@@ -174,6 +200,9 @@ impl Op {
             Op::Delete { .. } => "delete",
             Op::Connect { .. } => "connect",
             Op::Clear { .. } => "clear",
+            Op::Comment { .. } => "comment",
+            Op::Reply { .. } => "reply",
+            Op::Resolve { .. } => "resolve",
         }
     }
 }
@@ -194,6 +223,9 @@ pub struct OpsCtx {
     /// Link schemes accepted on top of `http`, `https` and `mailto` (lower-case, without
     /// the colon), from `ops.extra_url_schemes` in the server config.
     pub extra_url_schemes: Vec<String>,
+    /// The people on the canvas, whom checklist `assignees` resolve against by name, email
+    /// or id (loaded only when a batch assigns someone).
+    pub people: Vec<Person>,
 }
 
 impl OpsCtx {
@@ -206,7 +238,13 @@ impl OpsCtx {
             confirm_clear: false,
             origin: Point { x: 0.0, y: 0.0 },
             extra_url_schemes: Vec::new(),
+            people: Vec::new(),
         }
+    }
+
+    /// "Today" for timelines with no range of their own (UTC, from `now_ms`).
+    pub fn today(&self) -> String {
+        crate::timeline_text::today_iso(self.now_ms)
     }
 }
 
@@ -300,6 +338,7 @@ fn record(res: &mut OpsResult, index: usize, name: &str, out: OneResult) {
 }
 
 fn apply_one(txn: &mut TransactionMut, shapes: &MapRef, op: &Op, ctx: &OpsCtx) -> OneResult {
+    let op_kind = op;
     match op {
         Op::Add { shape } => {
             let (id, at) = op_add(txn, shapes, shape, ctx)?;
@@ -332,6 +371,21 @@ fn apply_one(txn: &mut TransactionMut, shapes: &MapRef, op: &Op, ctx: &OpsCtx) -
             }
             shapes.clear(txn);
             Ok((None, None))
+        }
+        Op::Comment { op } => {
+            let (id, at) = comment_ops::op_comment(txn, shapes, op, ctx)?;
+            Ok((Some(id), Some(at)))
+        }
+        Op::Reply { op } | Op::Resolve { op } => {
+            let id = if matches!(op_kind, Op::Reply { .. }) {
+                comment_ops::op_reply(txn, shapes, op, ctx)?
+            } else {
+                comment_ops::op_resolve(txn, shapes, op, ctx)?
+            };
+            let at = crate::comments::get_thread(txn, &id)
+                .filter(|t| live_shape(txn, shapes, &t.anchor).is_some())
+                .map(|t| anchor_of(txn, shapes, &t.anchor, ctx));
+            Ok((Some(id), at))
         }
     }
 }
@@ -454,6 +508,7 @@ fn check_end(
 
 /// The checked, normalised props a caller gave for a shape of `kind` (the page's
 /// `cleanProps`). `image: null` survives as `Value::Null` (= remove).
+#[allow(clippy::too_many_lines)]
 fn clean_props(
     kind: ShapeType,
     raw: &JsonMap<String, Value>,
@@ -549,6 +604,12 @@ fn clean_props(
                 value.clone()
             }
             "columns" | "rows" => clean_checklist_list(key, value, txn, shapes, self_id)?,
+            // Resolved against the final rows and columns by the op.
+            "picks" | "notes" | "assignees" => continue,
+            "live" => match value {
+                Value::Bool(_) => value.clone(),
+                _ => return Err("`live` must be true or false".into()),
+            },
             "from" | "to" => {
                 let end = Endpoint::read(value).ok_or_else(|| {
                     format!("`{key}` must be a shape id, {{ref, side?}} or {{x, y}}")
@@ -776,6 +837,10 @@ fn create(
     }
 }
 
+fn need_shape_map(txn: &TransactionMut, shapes: &MapRef, id: &str) -> Result<MapRef, String> {
+    shape_map(txn, shapes, id).ok_or_else(|| format!("no shape {id}"))
+}
+
 fn need_shape(txn: &TransactionMut, shapes: &MapRef, id: &str) -> Result<Shape, String> {
     live_shape(txn, shapes, bare_id(id)).ok_or_else(|| format!("no shape {id}"))
 }
@@ -854,37 +919,6 @@ fn type_defaults(kind: ShapeType, props: &mut JsonMap<String, Value>) -> Result<
                 }
             }
         }
-        ShapeType::Checklist => {
-            let input = ChecklistInput::take(props);
-            let columns = input
-                .columns
-                .unwrap_or_else(|| DEFAULT_COLUMNS.iter().map(|c| (*c).to_owned()).collect());
-            let rows = input.rows.unwrap_or_default();
-            if !props.contains_key("title") {
-                props.insert("title".into(), "".into());
-            }
-            // Checked before anything is written: a bad pick fails the whole add.
-            if let Some(p) = &input.picks {
-                clean_picks(p, &rows, &columns)?;
-            }
-            if !props.contains_key("w") {
-                props.insert("w".into(), checklist_width(columns.len()).into());
-            }
-            if !props.contains_key("h") {
-                props.insert(
-                    "h".into(),
-                    checklist_height(columns.len(), rows.len()).into(),
-                );
-            }
-            props.insert("columns".into(), json!(columns));
-            props.insert(
-                "rows".into(),
-                Value::Array(rows.iter().map(Row::to_json).collect()),
-            );
-            if let Some(p) = input.picks {
-                props.insert("picks".into(), p);
-            }
-        }
         ShapeType::Link => {
             let Some(u) = props.get("url").and_then(Value::as_str).map(str::to_owned) else {
                 return Err("a link needs `url`".into());
@@ -896,10 +930,66 @@ fn type_defaults(kind: ShapeType, props: &mut JsonMap<String, Value>) -> Result<
             {
                 props.insert("title".into(), host_of(&u).into());
             }
+            if is_true(props.get("live")) && !frame_url(&u) {
+                return Err("a live frame needs an http(s) `url`".into());
+            }
         }
         _ => {}
     }
     Ok(())
+}
+
+fn is_true(v: Option<&Value>) -> bool {
+    v == Some(&Value::Bool(true))
+}
+
+/// A shape id an op gave (`shape.id` on add, `id` on connect and comment), checked.
+fn given_id(v: Option<&Value>, exists: bool, key: &str) -> Result<Option<String>, String> {
+    match v {
+        None => Ok(None),
+        Some(Value::String(s)) if valid_shape_id(s) => {
+            if exists {
+                return Err(format!("a shape with id {s} already exists"));
+            }
+            Ok(Some(s.clone()))
+        }
+        Some(_) => Err(format!("`{key}` must be 1–64 of A–Z a–z 0–9 _ - : .")),
+    }
+}
+
+/// A free spot near the origin for a box of `w`×`h`.
+fn place_free(txn: &TransactionMut, shapes: &MapRef, w: f64, h: f64, ctx: &OpsCtx) -> Point {
+    let taken: Vec<BoxF> = all_shapes(txn, shapes)
+        .iter()
+        .filter(|s| !s.is_arrow())
+        .map(Shape::bbox)
+        .collect();
+    find_free_spot(&taken, w, h, ctx.origin)
+}
+
+/// Fills in `x`/`y` the caller left out with a free spot for a `w`×`h` box.
+fn place_props(
+    txn: &TransactionMut,
+    shapes: &MapRef,
+    props: &mut JsonMap<String, Value>,
+    w: f64,
+    h: f64,
+    ctx: &OpsCtx,
+) -> Point {
+    let (x, y) = (num(props, "x"), num(props, "y"));
+    if x.is_none() || y.is_none() {
+        let spot = place_free(txn, shapes, w, h, ctx);
+        if x.is_none() {
+            props.insert("x".into(), spot.x.into());
+        }
+        if y.is_none() {
+            props.insert("y".into(), spot.y.into());
+        }
+    }
+    Point {
+        x: num(props, "x").unwrap_or(0.0),
+        y: num(props, "y").unwrap_or(0.0),
+    }
 }
 
 #[allow(clippy::many_single_char_names)]
@@ -909,23 +999,54 @@ fn op_add(
     raw: &JsonMap<String, Value>,
     ctx: &OpsCtx,
 ) -> Result<(String, Point), String> {
-    let kind = raw
-        .get("type")
-        .and_then(Value::as_str)
-        .and_then(ShapeType::parse)
-        .ok_or("`shape.type` must be sticky, text, frame, arrow, image, link or checklist")?;
-    let id = match raw.get("id") {
-        None => None,
-        Some(Value::String(s)) if valid_shape_id(s) => {
-            if shapes.contains_key(txn, s) {
-                return Err(format!("a shape with id {s} already exists"));
-            }
-            Some(s.clone())
-        }
-        Some(_) => return Err("`shape.id` must be 1–64 of A–Z a–z 0–9 _ - : .".into()),
-    };
-    let mut props = clean_props(kind, raw, txn, shapes, id.as_deref(), ctx)?;
-    let id = id.unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+    const TYPES: &str =
+        "`shape.type` must be sticky, text, frame, arrow, image, link, checklist, timeline or web";
+    let mut raw = raw.clone();
+    // `web` (or `iframe`): a live web frame, which is a link with `live` — one shape type,
+    // so older clients still show it.
+    if matches!(
+        raw.get("type").and_then(Value::as_str),
+        Some("web" | "iframe")
+    ) {
+        let live = [raw.get("live"), raw.get("embed")]
+            .into_iter()
+            .flatten()
+            .find(|v| !v.is_null())
+            .cloned()
+            .unwrap_or(Value::Bool(true));
+        raw.insert("type".into(), "link".into());
+        raw.insert("live".into(), live);
+        raw.remove("embed");
+    }
+    let type_name = raw.get("type").and_then(Value::as_str).unwrap_or("");
+    let kind = ShapeType::parse(type_name);
+    if kind.is_none() && type_name != "timeline" {
+        return Err(TYPES.into());
+    }
+    let id = given_id(
+        raw.get("id"),
+        raw.get("id")
+            .and_then(Value::as_str)
+            .is_some_and(|s| shapes.contains_key(txn, s)),
+        "shape.id",
+    )?;
+    let view = raw.get("view");
+    // A timeline is a note in the timeline view: every Copper shows its text.
+    if type_name == "timeline"
+        || (kind == Some(ShapeType::Sticky) && view.and_then(Value::as_str) == Some("timeline"))
+    {
+        return timeline_ops::add_timeline_note(txn, shapes, &raw, ctx, id);
+    }
+    let kind = kind.ok_or(TYPES)?;
+    // A checklist is a note in the checklist view: every Copper shows its text.
+    if kind == ShapeType::Sticky && matches!(view, Some(Value::Null | Value::Bool(false))) {
+        raw.remove("view");
+    }
+    if kind == ShapeType::Checklist || (kind == ShapeType::Sticky && raw.contains_key("view")) {
+        return note_ops::add_checklist_note(txn, shapes, kind, &raw, ctx, id);
+    }
+    let mut props = clean_props(kind, &raw, txn, shapes, id.as_deref(), ctx)?;
+    let id = id.unwrap_or_else(new_shape_id);
     props.insert("by".into(), ctx.by.clone().into());
 
     if kind == ShapeType::Arrow {
@@ -942,51 +1063,62 @@ fn op_add(
         return Ok((id, anchor));
     }
     type_defaults(kind, &mut props)?;
-    let (dw, dh) = kind.default_size();
+    let live = kind == ShapeType::Link && is_true(props.get("live"));
+    let (dw, dh) = if live { LIVE_SIZE } else { kind.default_size() };
     let (mut w, mut h) = (
         num(&props, "w").unwrap_or(dw),
         num(&props, "h").unwrap_or(dh),
     );
-    if let Some((mw, mh)) = kind.min_size() {
+    if let Some((mw, mh)) = min_size_for(kind, None, live) {
         w = w.max(mw);
         h = h.max(mh);
     }
     props.insert("w".into(), w.into());
     props.insert("h".into(), h.into());
-    let (x, y) = (num(&props, "x"), num(&props, "y"));
-    if x.is_none() || y.is_none() {
-        let taken: Vec<BoxF> = all_shapes(txn, shapes)
-            .iter()
-            .filter(|s| !s.is_arrow())
-            .map(Shape::bbox)
-            .collect();
-        let spot = find_free_spot(&taken, w, h, ctx.origin);
-        if x.is_none() {
-            props.insert("x".into(), spot.x.into());
-        }
-        if y.is_none() {
-            props.insert("y".into(), spot.y.into());
-        }
-    }
-    let picks = props.remove("picks");
+    let at = place_props(txn, shapes, &mut props, w, h, ctx);
     create(txn, shapes, kind, &id, &props, ctx);
-    if let (ShapeType::Checklist, Some(picks)) = (kind, picks) {
-        if let Some(m) = shape_map(txn, shapes, &id) {
-            let input = ChecklistInput {
-                picks: Some(picks),
-                ..ChecklistInput::default()
-            };
-            write_checklist(txn, &m, &input, &picker(ctx), true, true)?;
-        }
-    }
-    let b = BoxF {
-        x: num(&props, "x").unwrap_or(0.0),
-        y: num(&props, "y").unwrap_or(0.0),
-        w,
-        h,
-    };
-    Ok((id, center(&b)))
+    Ok((
+        id,
+        center(&BoxF {
+            x: at.x,
+            y: at.y,
+            w,
+            h,
+        }),
+    ))
 }
+
+/// A new shape's id (a time-ordered UUID; ids are opaque to every client).
+fn new_shape_id() -> String {
+    uuid::Uuid::now_v7().to_string()
+}
+
+/// Rows as `clean_props` returns them (`[{id, label}]`).
+fn rows_of(v: &Value) -> Vec<Row> {
+    v.as_array()
+        .map(|list| {
+            list.iter()
+                .map(|r| Row {
+                    id: r["id"].as_str().unwrap_or_default().to_owned(),
+                    label: r["label"].as_str().unwrap_or_default().to_owned(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Columns as `clean_props` returns them.
+fn columns_of(v: &Value) -> Vec<String> {
+    v.as_array()
+        .map(|l| {
+            l.iter()
+                .filter_map(|c| c.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+const TIMELINE_ONLY: [&str; 6] = ["start", "end", "step", "items", "addItems", "editItems"];
 
 fn op_update(
     txn: &mut TransactionMut,
@@ -996,8 +1128,73 @@ fn op_update(
     ctx: &OpsCtx,
 ) -> Result<String, String> {
     let shape = need_shape(txn, shapes, id)?;
+    let raw_view = patch.get("view");
+    if shape.kind == ShapeType::Sticky
+        && (raw_view.and_then(Value::as_str) == Some("timeline")
+            || (shape.view == Some(View::Timeline)
+                && raw_view.and_then(Value::as_str) != Some("checklist"))
+            || (shape.view.is_none() && TIMELINE_ONLY.iter().any(|k| patch.contains_key(*k))))
+    {
+        return timeline_ops::update_timeline_note(txn, shapes, &shape, patch, ctx);
+    }
+    if shape.kind == ShapeType::Sticky
+        && (shape.view == Some(View::Checklist) || patch.contains_key("view"))
+    {
+        return note_ops::update_checklist_note(txn, shapes, &shape, patch, ctx);
+    }
     let mut props = clean_props(shape.kind, patch, txn, shapes, Some(&shape.id), ctx)?;
-    clamp_min(shape.kind, &mut props);
+    let m = shape_map(txn, shapes, &shape.id).ok_or_else(|| format!("no shape {id}"))?;
+    if shape.kind == ShapeType::Checklist {
+        let columns = props.remove("columns").as_ref().map(columns_of);
+        let rows = props.remove("rows").as_ref().map(rows_of);
+        let live = shape.checklist.clone().unwrap_or_default();
+        // Checked before anything is written: a bad pick fails the whole update.
+        let plan = LegacyPlan::check(columns, rows, patch, &live, &ctx.people)?;
+        clamp_min(ShapeType::Checklist, &mut props);
+        let sized = (props.contains_key("w"), props.contains_key("h"));
+        store_update(txn, &m, shape.kind, &props, ctx);
+        plan.write(txn, &m, &live, shape.w, &picker(ctx), sized);
+        return Ok(shape.id);
+    }
+    if shape.kind == ShapeType::Link {
+        let url = props.get("url").and_then(Value::as_str).map(str::to_owned);
+        if is_true(props.get("live")) && !frame_url(url.as_deref().unwrap_or(&shape.url)) {
+            return Err("a live frame needs an http(s) `url`".into());
+        }
+        // A new address without a new name: the old page's name and icon would be wrong.
+        if let Some(u) = url.filter(|u| !u.is_empty() && *u != shape.url) {
+            if !props.contains_key("title") {
+                props.insert("title".into(), host_of(&u).into());
+            }
+            if !props.contains_key("favicon")
+                && shape.favicon.is_some()
+                && host_of(&u) != host_of(&shape.url)
+            {
+                props.insert("favicon".into(), "".into());
+            }
+        }
+    }
+    let live = match props.get("live") {
+        Some(Value::Bool(b)) => *b,
+        _ => shape.live,
+    };
+    if let Some((mw, mh)) = min_size_for(shape.kind, None, live) {
+        // Turning a small card live makes it a frame worth looking at.
+        if shape.kind == ShapeType::Link && is_true(props.get("live")) && !shape.live {
+            if !props.contains_key("w") {
+                props.insert("w".into(), shape.w.max(LIVE_SIZE.0).into());
+            }
+            if !props.contains_key("h") {
+                props.insert("h".into(), shape.h.max(LIVE_SIZE.1).into());
+            }
+        }
+        if let Some(w) = num(&props, "w") {
+            props.insert("w".into(), w.max(mw).into());
+        }
+        if let Some(h) = num(&props, "h") {
+            props.insert("h".into(), h.max(mh).into());
+        }
+    }
     if shape.is_arrow() {
         let pick = |k: &str, cur: &Option<Endpoint>| {
             props
@@ -1014,22 +1211,6 @@ fn op_update(
                 return Err("an arrow cannot start and end on the same shape".into());
             }
         }
-    }
-    let m = shape_map(txn, shapes, &shape.id).ok_or_else(|| format!("no shape {id}"))?;
-    if shape.kind == ShapeType::Checklist {
-        let input = ChecklistInput::take(&mut props);
-        if let Some(p) = &input.picks {
-            let live = shape.checklist.clone().unwrap_or_default();
-            clean_picks(
-                p,
-                input.rows.as_deref().unwrap_or(&live.rows),
-                input.columns.as_deref().unwrap_or(&live.columns),
-            )?;
-        }
-        let sized = (props.contains_key("w"), props.contains_key("h"));
-        store_update(txn, &m, shape.kind, &props, ctx);
-        write_checklist(txn, &m, &input, &picker(ctx), sized.0, sized.1)?;
-        return Ok(shape.id);
     }
     store_update(txn, &m, shape.kind, &props, ctx);
     Ok(shape.id)
@@ -1111,16 +1292,23 @@ fn op_resize(
     ctx: &OpsCtx,
 ) -> Result<String, String> {
     let shape = need_shape(txn, shapes, id)?;
-    let Some((mw, mh)) = shape.kind.min_size() else {
+    let Some((mw, mh)) = shape.min_size() else {
         return Err(format!("{} shapes have no size", shape.kind.as_str()));
     };
     let (w, h) = (w.unwrap_or(shape.w), h.unwrap_or(shape.h));
     if !(w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0) {
         return Err("`w` and `h` must be positive numbers".into());
     }
+    let nw = w.max(mw);
+    // A timeline is never shorter than its content needs at its new width.
+    let need = if shape.view == Some(View::Timeline) {
+        crate::timeline::needed_height(&shape.text, nw, &ctx.today())
+    } else {
+        0.0
+    };
     let mut props = JsonMap::new();
-    props.insert("w".into(), w.max(mw).into());
-    props.insert("h".into(), h.max(mh).into());
+    props.insert("w".into(), nw.into());
+    props.insert("h".into(), h.max(mh).max(need).into());
     let m = shape_map(txn, shapes, &shape.id).ok_or_else(|| format!("no shape {id}"))?;
     store_update(txn, &m, shape.kind, &props, ctx);
     Ok(shape.id)
@@ -1185,19 +1373,16 @@ fn op_connect(
     if let Some(c) = color {
         raw.insert("color".into(), c.clone());
     }
-    let id = match id {
-        None => None,
-        Some(Value::String(s)) if valid_shape_id(s) => {
-            if shapes.contains_key(txn, s) {
-                return Err(format!("a shape with id {s} already exists"));
-            }
-            Some(s.clone())
-        }
-        Some(_) => return Err("`id` must be 1–64 of A–Z a–z 0–9 _ - : .".into()),
-    };
+    let id = given_id(
+        id.as_ref(),
+        id.as_ref()
+            .and_then(Value::as_str)
+            .is_some_and(|s| shapes.contains_key(txn, s)),
+        "id",
+    )?;
     let mut props = clean_props(ShapeType::Arrow, &raw, txn, shapes, id.as_deref(), ctx)?;
     props.insert("by".into(), ctx.by.clone().into());
-    let id = id.unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+    let id = id.unwrap_or_else(new_shape_id);
     create(txn, shapes, ShapeType::Arrow, &id, &props, ctx);
     let at = anchor_of(txn, shapes, &id, ctx);
     Ok((id, at))

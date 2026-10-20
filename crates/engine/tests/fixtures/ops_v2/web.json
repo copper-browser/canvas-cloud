@@ -1,0 +1,280 @@
+{
+ "name": "web",
+ "now": 1790000000000,
+ "by": "Planner",
+ "byId": "agent:planner",
+ "people": [
+  {
+   "id": "u-grace",
+   "name": "Grace Hopper",
+   "email": "grace@example.com"
+  },
+  {
+   "id": "u-ada",
+   "name": "Ada Lovelace",
+   "email": "ada@example.com"
+  }
+ ],
+ "seed": {},
+ "steps": [
+  {
+   "ops": [
+    {
+     "op": "add",
+     "shape": {
+      "id": "w",
+      "type": "web",
+      "x": 0,
+      "y": 0,
+      "url": "https://example.com/docs"
+     }
+    },
+    {
+     "op": "add",
+     "shape": {
+      "id": "l",
+      "type": "link",
+      "x": 1000,
+      "y": 0,
+      "url": "https://example.org",
+      "live": true,
+      "title": "Org"
+     }
+    },
+    {
+     "op": "add",
+     "shape": {
+      "id": "card",
+      "type": "link",
+      "x": 1000,
+      "y": 800,
+      "url": "https://example.net/a"
+     }
+    },
+    {
+     "op": "add",
+     "shape": {
+      "type": "web",
+      "url": "mailto:a@example.com"
+     }
+    },
+    {
+     "op": "add",
+     "shape": {
+      "type": "link",
+      "url": "https://example.com",
+      "live": "yes"
+     }
+    }
+   ],
+   "applied": 3,
+   "ids": [
+    "w",
+    "l",
+    "card",
+    null,
+    null
+   ],
+   "errors": [
+    {
+     "index": 3,
+     "error": "a live frame needs an http(s) `url`"
+    },
+    {
+     "index": 4,
+     "error": "`live` must be true or false"
+    }
+   ]
+  },
+  {
+   "ops": [
+    {
+     "op": "update",
+     "id": "w",
+     "patch": {
+      "live": false
+     }
+    },
+    {
+     "op": "update",
+     "id": "card",
+     "patch": {
+      "live": true
+     }
+    },
+    {
+     "op": "resize",
+     "id": "l",
+     "w": 100,
+     "h": 100
+    },
+    {
+     "op": "update",
+     "id": "l",
+     "patch": {
+      "url": "https://example.com/other"
+     }
+    }
+   ],
+   "applied": 4,
+   "ids": [
+    "w",
+    "card",
+    "l",
+    "l"
+   ],
+   "errors": []
+  }
+ ],
+ "doc": {
+  "shapes": {
+   "Y.Map": {
+    "card": {
+     "Y.Map": {
+      "by": "Planner",
+      "color": "white",
+      "createdAt": {
+       "f64": 1790000000000
+      },
+      "h": {
+       "i": 640
+      },
+      "id": "card",
+      "live": true,
+      "title": "example.net",
+      "type": "link",
+      "updatedAt": {
+       "f64": 1790000000000
+      },
+      "url": "https://example.net/a",
+      "w": {
+       "i": 960
+      },
+      "x": {
+       "i": 1000
+      },
+      "y": {
+       "i": 800
+      },
+      "z": {
+       "i": 3
+      }
+     }
+    },
+    "l": {
+     "Y.Map": {
+      "by": "Planner",
+      "color": "white",
+      "createdAt": {
+       "f64": 1790000000000
+      },
+      "h": {
+       "i": 200
+      },
+      "id": "l",
+      "live": true,
+      "title": "example.com",
+      "type": "link",
+      "updatedAt": {
+       "f64": 1790000000000
+      },
+      "url": "https://example.com/other",
+      "w": {
+       "i": 320
+      },
+      "x": {
+       "i": 1000
+      },
+      "y": {
+       "i": 0
+      },
+      "z": {
+       "i": 2
+      }
+     }
+    },
+    "w": {
+     "Y.Map": {
+      "by": "Planner",
+      "color": "white",
+      "createdAt": {
+       "f64": 1790000000000
+      },
+      "h": {
+       "i": 640
+      },
+      "id": "w",
+      "live": false,
+      "title": "example.com",
+      "type": "link",
+      "updatedAt": {
+       "f64": 1790000000000
+      },
+      "url": "https://example.com/docs",
+      "w": {
+       "i": 960
+      },
+      "x": {
+       "i": 0
+      },
+      "y": {
+       "i": 0
+      },
+      "z": {
+       "i": 1
+      }
+     }
+    }
+   }
+  },
+  "comments": {
+   "Y.Map": {}
+  }
+ },
+ "read": {
+  "shapes": [
+   {
+    "id": "w",
+    "type": "link",
+    "x": 0,
+    "y": 0,
+    "w": 960,
+    "h": 640,
+    "color": "white",
+    "z": 1,
+    "by": "Planner",
+    "url": "https://example.com/docs",
+    "title": "example.com"
+   },
+   {
+    "id": "l",
+    "type": "link",
+    "x": 1000,
+    "y": 0,
+    "w": 320,
+    "h": 200,
+    "color": "white",
+    "z": 2,
+    "by": "Planner",
+    "url": "https://example.com/other",
+    "title": "example.com",
+    "live": true
+   },
+   {
+    "id": "card",
+    "type": "link",
+    "x": 1000,
+    "y": 800,
+    "w": 960,
+    "h": 640,
+    "color": "white",
+    "z": 3,
+    "by": "Planner",
+    "url": "https://example.net/a",
+    "title": "example.net",
+    "live": true
+   }
+  ],
+  "comments": []
+ }
+}

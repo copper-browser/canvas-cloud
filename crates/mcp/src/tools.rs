@@ -492,7 +492,7 @@ fn read_summary(read: &Value, size: usize, full: bool) -> Value {
     }
     let brief = |s: &Value| {
         let mut b = Map::new();
-        for k in ["id", "type", "x", "y", "w", "h", "frame"] {
+        for k in ["id", "type", "view", "live", "x", "y", "w", "h", "frame"] {
             if let Some(v) = s.get(k) {
                 b.insert(k.to_owned(), v.clone());
             }
@@ -530,6 +530,7 @@ fn read_summary(read: &Value, size: usize, full: bool) -> Value {
         "shapes": listed,
         "shapes_listed": listed.len(),
         "agents": read["agents"],
+        "comments": read["comments"].as_array().map_or(0, Vec::len),
         "chat_messages": read["chat"].as_array().map_or(0, Vec::len),
         "hint": hint,
     })
@@ -747,7 +748,7 @@ fn read_canvas_in() -> Value {
             "types": {
                 "type": "array",
                 "items": ty("string"),
-                "description": "Only these shape types: sticky, text, frame, arrow, image, link, checklist.",
+                "description": "Only these shape types: sticky, text, frame, arrow, image, link, checklist, timeline, web (checklist/timeline also match notes in that view; web: live links).",
             },
             "full": {
                 "type": "boolean",
@@ -768,6 +769,17 @@ fn read_canvas_out() -> Value {
             "shapes": array_of(out(
                 json!({ "id": ty("string"), "type": ty("string") }),
                 &["id", "type"],
+            )),
+            "comments": array_of(out(
+                json!({
+                    "id": ty("string"),
+                    "anchor": ty("string"),
+                    "anchorDeleted": ty("boolean"),
+                    "resolved": ty("boolean"),
+                    "resolvedBy": ty("object"),
+                    "messages": array_of(ty("object")),
+                }),
+                &["id", "anchor", "resolved", "messages"],
             )),
             "agents": array_of(ty("object")),
             "selection": array_of(ty("string")),
@@ -956,7 +968,7 @@ fn mark_read_out() -> Value {
     )
 }
 
-const APPLY_OPS_DESCRIPTION: &str = r#"Edit a canvas: apply ops in order, in one transaction. Everyone in the canvas sees the change live. A bad op is skipped and reported in `errors` (by index); the rest still apply. At most 500 ops per call.
+const APPLY_OPS_DESCRIPTION: &str = r####"Edit a canvas: apply ops in order, in one transaction. Everyone in the canvas sees the change live. A bad op is skipped and reported in `errors` (by index); the rest still apply. At most 500 ops per call.
 
 Shape types (shape.type) and their props:
 - sticky: text (markdown, ≤ 20000 chars), fontSize?; 200x200, default yellow
@@ -964,8 +976,9 @@ Shape types (shape.type) and their props:
 - frame: title, image? ({src, naturalW, naturalH}); 480x320. Moving a frame carries every shape wholly inside it.
 - arrow: from, to (a shape id, {ref: id, side?: top|right|bottom|left}, or {x,y}), label? — usually made with connect
 - image: src (https: URL or data:image/… ≤ 2 MiB), naturalW, naturalH
-- link: url (http, https, mailto; bare hosts get https://), title? (default: the host)
-- checklist: title, columns (1-4 names, default ["Yes","No"]), rows (labels like "Ann" or {label, id?}, ≤ 60), picks ({"<row label or id>": "<column>" | true (first column) | null (clear)})
+- link: url (http, https, mailto; bare hosts get https://), title? (default: the host), live? — with live:true (or type "web") it shows the site itself on the board, an iframe everyone can browse: 960x640 by default, needs an http(s) url; update {live:false} turns it back into a card
+- checklist: a clickable RSVP / to-do card — {"type":"checklist", title, columns? (1-4 names, default ["Yes","No"]; one column = to-do boxes), rows (labels like "Ann", ≤ 60), picks? ({"Ann":"Yes"} | true (first column) | null (clear)), notes? ({"Ann":"Back at 6"}: the row's comment, multi-line), assignees? ({"Fix login":["Grace Hopper","ann@example.com"]}: up to 12 per row, canvas members by name, email or id, anyone else by a name of their own)}. It is stored as a sticky with view:"checklist" whose text is the list ("### Title", then "- [ ] Ann" / "- [x] Ann · No" lines, a row's comment as indented "  > …" lines under it, then one indented "  @Name" line per assignee), so older Coppers show it as a note with task boxes. In update, picks, notes and assignees name a row by label, null clears it (assignees replace the row's list); rows/columns/title replace them in the text (rows keep their picks, comments and assignees by label). {"op":"update","id":…,"patch":{"view":"checklist","columns"?}} turns a sticky that holds a heading and a task list into a card, ticks kept; view:null turns it back into a note. A checklist made by an older Copper (type "checklist" with rows as props) still reads and updates the same way.
+- timeline: {"type":"timeline", title?, start:"YYYY-MM-DD", end, step? (day|week|month|quarter|year), items?:[{date, end?, label, text?, color?}]} (text makes a bubble, end a section), stored as a sticky with view:"timeline" whose text is the timeline; update takes the same (items replaces the list) plus addItems:[…] and editItems:{ref: patch | null} (ref: "YYYY-MM-DD · label", a label, a date or an index; null removes; a ref that names no item fails the op and changes nothing).
 Every shape: x, y (top-left in canvas pixels; omit both to auto-place in free space near `near`), w, h, color (yellow, pink, blue, green, purple, gray, white, or #rgb/#rrggbb), z (stacking).
 
 Ops:
@@ -976,10 +989,11 @@ Ops:
 - {"op":"delete","id":"goal"} — arrows attached to it are deleted too
 - {"op":"connect","from":"goal","to":"risk","label":"blocked by"} — adds an arrow between two shapes (optional color, fromSide, toSide, id)
 - {"op":"clear"} — deletes every shape; refused unless confirm is true. Never clear unless the user explicitly asked.
+- Comment threads on a shape, Figma-style: {"op":"comment","on":"goal","text":"Is this still the plan?"} starts one (ids[i] is the thread id; optional id); {"op":"reply","thread":"<thread id>","text":"…"} adds onto one (a resolved thread opens again); {"op":"resolve","thread":"<thread id>","resolved":true|false} resolves or reopens. They are attributed to you (or `as`).
 Ids may be written "shape:<id>". Later ops in the same call can use ids given to shapes added earlier in it. Aliases: text (or label) on a frame, link or checklist is its title; text/title on an arrow is its label; title on a sticky/text is its text. Unknown props for a type are an error.
 
 Envelope: `as` ({"name":"Planner","color":"purple"}) attributes the edit to your agent: created shapes get by = name and your cursor shows as writing on the canvas (default: the signed-in user). `near` ({x,y}) is where auto-placement looks for free space (default 0,0). `confirm`: true unlocks clear.
-Result: {applied, ids: [shape id or null for each op], errors: [{index, op, error}]}. If nothing applied, the call is reported as an error."#;
+Result: {applied, ids: [shape or thread id, or null, for each op], errors: [{index, op, error}]}. If nothing applied, the call is reported as an error. Checklist cards, timelines, live links and comment ops need a server whose /v1/info `features` include "ops_v2"."####;
 
 static TOOLS: &[Tool] = &[
     Tool {
@@ -1025,7 +1039,7 @@ static TOOLS: &[Tool] = &[
     Tool {
         name: "read_canvas",
         title: "Read a canvas",
-        description: "Read a canvas: `canvas` {id, name, kind}; `shapes` sorted top-to-bottom then left-to-right, each with id, type, x, y, w, h, color, z, by (who made it) and per type: text (sticky/text), title (frame/link/checklist), label/from/to (arrow), url (link), src/naturalW/naturalH (image), columns/rows/tally (checklist), and `frame` (the frame it sits in); `agents` currently drawing; `count` (all shapes); `chat` (the last 50 messages, oldest first). Text is cut to 500 characters unless full=true. Narrow big canvases with `ids` or `types`; a read over 200 KB returns a summary (counts, frames, shape ids) with `truncated: true` instead.",
+        description: "Read a canvas: `canvas` {id, name, kind}; `shapes` sorted top-to-bottom then left-to-right, each with id, type, x, y, w, h, color, z, by (who made it) and per type: text (sticky/text), title (frame/link/checklist), label/from/to (arrow), url and live? (link; live: shown as a live web frame), src/naturalW/naturalH (image), and `frame` (the frame it sits in). A checklist card (a sticky with view:\"checklist\", or an older checklist shape) also has title, columns, rows:[{label, pick, by?, at?, note?, noteBy?, noteAt?, assignees?:[{name, id?, email?}]}] (note: the row's comment; an older checklist's rows also have id) and tally {column: count}; a timeline (view:\"timeline\") has title, start, end, step and items:[{date, end?, label, text?, color?, kind: note|bubble|section}]. `comments`: the comment threads people left on shapes, [{id, anchor (shape id), anchorDeleted?, resolved, resolvedBy?, messages:[{id, by, at, text, edited?}]}] (with ids/types, only those on the shapes returned). `agents` currently drawing; `count` (all shapes); `chat` (the last 50 messages, oldest first). Text is cut to 500 characters unless full=true. Narrow big canvases with `ids` or `types` (types match the stored type or the kind: checklist, timeline, web); a read over 200 KB returns a summary (counts, frames, shape ids) with `truncated: true` instead.",
         read_only: true,
         destructive: false,
         idempotent: true,
