@@ -28,11 +28,12 @@ pub use passwords::{
     MAX_PASSWORD_BYTES, MIN_PASSWORD_CHARS,
 };
 pub use store::{
-    audit, count_users, create_access_token, create_app, create_session,
-    create_session_with_expiry, default_display_name, get_setting, insert_user, list_apps,
+    audit, count_users, create_access_token, create_access_token_for, create_app,
+    create_app_session, create_app_with, create_session, create_session_with_expiry,
+    default_display_name, end_app_credentials, get_app, get_setting, insert_user, list_apps,
     revoke_app, revoke_session, rotate_app_key, set_setting, signup_allowed, user_email,
-    user_id_by_email, AppRow, NewUser, SignupPolicy, MAX_DISPLAY_NAME_CHARS, MAX_SUBJECT_CHARS,
-    MAX_USER_AGENT_CHARS,
+    user_id_by_email, AppCredentialsEnded, AppFlags, AppRow, NewUser, SignupPolicy,
+    MAX_DISPLAY_NAME_CHARS, MAX_SUBJECT_CHARS, MAX_USER_AGENT_CHARS,
 };
 
 use serde::{Deserialize, Serialize};

@@ -163,6 +163,19 @@ pub struct Limits {
     /// Sessions one linked app may mint per minute
     /// (`POST /v1/apps/self/users/{subject}/sessions`).
     pub app_sessions_per_minute: u32,
+    /// Hard lifetime of an app-minted session in hours: it still ends 30 days after its last
+    /// use, but never slides past this many hours after it was minted. `0` = no cap.
+    pub app_session_ttl_hours: u32,
+}
+
+impl Limits {
+    /// Longest `app_session_ttl_hours` (ten years).
+    pub const MAX_APP_SESSION_TTL_HOURS: u32 = 87_600;
+
+    /// The cap for app-minted sessions, `None` when `app_session_ttl_hours` is 0.
+    pub fn app_session_max_hours(&self) -> Option<u32> {
+        (self.app_session_ttl_hours > 0).then_some(self.app_session_ttl_hours)
+    }
 }
 
 impl Default for Limits {
@@ -172,6 +185,7 @@ impl Default for Limits {
             import_max_bytes: 512 << 20,
             import_max_line_bytes: 32 << 20,
             app_sessions_per_minute: 60,
+            app_session_ttl_hours: 720,
         }
     }
 }
@@ -318,6 +332,7 @@ struct RawLimits {
     import_max_bytes: Option<usize>,
     import_max_line_bytes: Option<usize>,
     app_sessions_per_minute: Option<u32>,
+    app_session_ttl_hours: Option<u32>,
 }
 
 #[derive(Clone, Copy)]
@@ -355,6 +370,7 @@ const ENV_KEYS: &[(&str, Kind)] = &[
     ("limits.import_max_bytes", Kind::Int),
     ("limits.import_max_line_bytes", Kind::Int),
     ("limits.app_sessions_per_minute", Kind::Int),
+    ("limits.app_session_ttl_hours", Kind::Int),
 ];
 
 /// Environment variable name for a dotted config key: `tls.mode` → `CANVAS_CLOUD_TLS__MODE`.
@@ -553,7 +569,17 @@ impl Config {
                 .limits
                 .app_sessions_per_minute
                 .unwrap_or(defaults.app_sessions_per_minute),
+            app_session_ttl_hours: raw
+                .limits
+                .app_session_ttl_hours
+                .unwrap_or(defaults.app_session_ttl_hours),
         };
+        if limits.app_session_ttl_hours > Limits::MAX_APP_SESSION_TTL_HOURS {
+            bail!(
+                "`limits.app_session_ttl_hours` must be at most {} (0 = no cap)",
+                Limits::MAX_APP_SESSION_TTL_HOURS
+            );
+        }
         if limits.auth_per_minute == 0 {
             bail!("`limits.auth_per_minute` must be at least 1");
         }
@@ -1300,6 +1326,30 @@ mod tests {
             &env(&[("CANVAS_CLOUD_LIMITS__APP_SESSIONS_PER_MINUTE", "0")]),
         );
         assert!(zero.is_err());
+    }
+
+    #[test]
+    fn app_session_ttl() {
+        let c = Config::from_toml_str(BASE, &env(&[])).unwrap();
+        assert_eq!(c.limits.app_session_ttl_hours, 720);
+        assert_eq!(c.limits.app_session_max_hours(), Some(720));
+        let c = Config::from_toml_str(
+            BASE,
+            &env(&[("CANVAS_CLOUD_LIMITS__APP_SESSION_TTL_HOURS", "0")]),
+        )
+        .unwrap();
+        assert_eq!(c.limits.app_session_max_hours(), None, "0 = no cap");
+        let c = Config::from_toml_str(
+            &format!("{BASE}\n[limits]\napp_session_ttl_hours = 12\n"),
+            &env(&[]),
+        )
+        .unwrap();
+        assert_eq!(c.limits.app_session_max_hours(), Some(12));
+        let huge = Config::from_toml_str(
+            BASE,
+            &env(&[("CANVAS_CLOUD_LIMITS__APP_SESSION_TTL_HOURS", "87601")]),
+        );
+        assert!(huge.is_err());
     }
 
     #[test]

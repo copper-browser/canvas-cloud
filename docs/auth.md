@@ -37,7 +37,7 @@ canvas invites; lookups are case-insensitive.
 
 | Prefix | What | Where it comes from | Can manage tokens / sign out |
 |---|---|---|---|
-| `cvs_` | session (expires 30 days after its last use) | signup, login, OIDC, a `trust_email` linked app ([delegated sign-in](#delegated-sign-in)) | yes |
+| `cvs_` | session (expires 30 days after its last use) | signup, login, OIDC, a linked app with `allow_sessions` and `trust_email` ([delegated sign-in](#delegated-sign-in); also ends with the app's revocation and after `limits.app_session_ttl_hours`) | yes |
 | `cvt_` | personal access token, `read` or `write` | `POST /v1/tokens` | no |
 | `cva_` + `X-Canvas-User: <subject>` | a linked app acting for one of its users | `canvas-cloud apps create` | no |
 
@@ -265,10 +265,32 @@ name = "Team portal"                            # button label (defaults to id)
 start_url = "https://portal.example.com/canvas-signin"   # https (http only for loopback)
 ```
 
-The site also holds a [linked-app](apps.md) key whose app has `trust_email` (the default):
-it provisions the person (`PUT /v1/apps/self/users/{subject}`) and mints their session with
+The site also holds a [linked-app](apps.md) key: it provisions the person
+(`PUT /v1/apps/self/users/{subject}`) and mints their session with
 [`POST /v1/apps/self/users/{subject}/sessions`](apps.md#post-v1appsselfuserssubjectsessions--sign-a-user-in).
 The server stores nothing about the provider and never calls it.
+
+Minting sessions is an explicit opt-in on that app, separate from `trust_email`: the app needs
+`trust_email` (the default) **and** `allow_sessions` (off by default, and off for every app
+that existed before 0.2.1). Without it the mint returns `403 sessions_not_allowed` and the
+delegated sign-in fails. An operator turns it on for the provider's app only:
+
+```sh
+canvas-cloud apps set "Team portal" --allow-sessions true   # by name or id
+canvas-cloud doctor                                         # lists the apps that may sign users in
+```
+
+Such a key can sign in as anyone the app can link by email, so treat it like the server's
+own secrets. What it mints stays answerable to it:
+
+* every minted session is tagged with the app, and so is every access token a person creates
+  while signed in with one;
+* `canvas-cloud apps revoke <app>` and `canvas-cloud apps rotate <app>` delete those sessions
+  and revoke those tokens (`apps rotate --keep-sessions` keeps them, for routine rotation of a
+  key that is not suspected) — see [apps.md](apps.md#revoking-and-rotating);
+* a minted session ends 30 days after its last use, and at the latest
+  `limits.app_session_ttl_hours` (default 720) after it was minted; signing in through the
+  site again mints a new one.
 
 For the browser it is **the same protocol as OIDC**; a client needs no special case:
 

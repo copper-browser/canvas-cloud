@@ -120,11 +120,47 @@ pub async fn create_session_with_expiry<'e, E>(
 where
     E: sqlx::PgExecutor<'e>,
 {
+    insert_session(db, user_id, user_agent, None, None).await
+}
+
+/// A session a linked app minted for one of its users
+/// (`POST /v1/apps/self/users/{subject}/sessions`): tagged with `app_id`
+/// (`sessions.created_by_app`), so revoking or rotating the app ends it. With
+/// `max_lifetime_hours` it never slides past that many hours from now. Returns the `cvs_…`
+/// token and when it expires unless it is used.
+pub async fn create_app_session<'e, E>(
+    db: E,
+    user_id: Uuid,
+    user_agent: Option<&str>,
+    app_id: Uuid,
+    max_lifetime_hours: Option<u32>,
+) -> ApiResult<(String, OffsetDateTime)>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    insert_session(db, user_id, user_agent, Some(app_id), max_lifetime_hours).await
+}
+
+async fn insert_session<'e, E>(
+    db: E,
+    user_id: Uuid,
+    user_agent: Option<&str>,
+    created_by_app: Option<Uuid>,
+    max_lifetime_hours: Option<u32>,
+) -> ApiResult<(String, OffsetDateTime)>
+where
+    E: sqlx::PgExecutor<'e>,
+{
     let (token, digest) = mint(CredentialKind::Session);
     let user_agent = user_agent.and_then(|ua| super::clean_name(Some(ua), MAX_USER_AGENT_CHARS));
+    let max_hours = max_lifetime_hours.map(|h| i32::try_from(h).unwrap_or(i32::MAX));
+    // LEAST ignores NULL: without a cap this is the ordinary sliding expiry.
     let expires_at: OffsetDateTime = sqlx::query_scalar(
-        "INSERT INTO sessions (id, user_id, token_sha256, user_agent, expires_at)
-         VALUES ($1, $2, $3, $4, now() + make_interval(days => $5))
+        "INSERT INTO sessions (id, user_id, token_sha256, user_agent, expires_at, created_by_app,
+                               max_expires_at)
+         VALUES ($1, $2, $3, $4,
+                 LEAST(now() + make_interval(days => $5), now() + make_interval(hours => $7)),
+                 $6, now() + make_interval(hours => $7))
          RETURNING expires_at",
     )
     .bind(ids::uuid_v7())
@@ -132,6 +168,8 @@ where
     .bind(&digest[..])
     .bind(user_agent)
     .bind(SESSION_TTL_DAYS)
+    .bind(created_by_app)
+    .bind(max_hours)
     .fetch_one(db)
     .await?;
     Ok((token, expires_at))
@@ -158,13 +196,30 @@ pub async fn create_access_token<'e, E>(
 where
     E: sqlx::PgExecutor<'e>,
 {
+    create_access_token_for(db, user_id, name, scope, expires_at, None).await
+}
+
+/// [`create_access_token`], tagged with the app whose minted session created it
+/// (`access_tokens.created_by_app`), so revoking or rotating that app revokes it too.
+pub async fn create_access_token_for<'e, E>(
+    db: E,
+    user_id: Uuid,
+    name: &str,
+    scope: Scope,
+    expires_at: Option<OffsetDateTime>,
+    created_by_app: Option<Uuid>,
+) -> ApiResult<(Uuid, String)>
+where
+    E: sqlx::PgExecutor<'e>,
+{
     let name = super::clean_name(Some(name), MAX_DISPLAY_NAME_CHARS)
         .ok_or_else(|| ApiError::bad_request("token name must not be empty"))?;
     let id = ids::uuid_v7();
     let (token, digest) = mint(CredentialKind::Token);
     sqlx::query(
-        "INSERT INTO access_tokens (id, user_id, name, token_sha256, scope, expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6)",
+        "INSERT INTO access_tokens (id, user_id, name, token_sha256, scope, expires_at,
+                                    created_by_app)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
     )
     .bind(id)
     .bind(user_id)
@@ -172,6 +227,7 @@ where
     .bind(&digest[..])
     .bind(scope.as_str())
     .bind(expires_at)
+    .bind(created_by_app)
     .execute(db)
     .await?;
     Ok((id, token))
@@ -187,6 +243,9 @@ pub struct AppRow {
     pub name: String,
     pub allow_import: bool,
     pub trust_email: bool,
+    /// May mint user sessions (`POST /v1/apps/self/users/{subject}/sessions`; that also needs
+    /// `trust_email`).
+    pub allow_sessions: bool,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
     #[serde(with = "time::serde::rfc3339::option")]
@@ -195,68 +254,192 @@ pub struct AppRow {
     pub revoked_at: Option<OffsetDateTime>,
     /// Number of users linked to the app.
     pub users: i64,
+    /// Live sessions the app minted.
+    pub live_sessions: i64,
+    /// Live access tokens created with those sessions.
+    pub live_tokens: i64,
 }
 
-/// Register a linked app; returns `(id, "cva_…")` (the key is shown once).
+impl AppRow {
+    /// Whether the app may sign its users in right now: live, `allow_sessions` and
+    /// `trust_email`.
+    pub fn can_mint_sessions(&self) -> bool {
+        self.revoked_at.is_none() && self.allow_sessions && self.trust_email
+    }
+}
+
+/// A linked app's policy.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct AppFlags {
+    /// May create canvases with `POST /v1/apps/self/import`.
+    pub allow_import: bool,
+    /// Provisioning links an existing user with the same email (else `409 email_taken`).
+    pub trust_email: bool,
+    /// May sign its users in (`POST /v1/apps/self/users/{subject}/sessions`; also needs
+    /// `trust_email`).
+    pub allow_sessions: bool,
+}
+
+/// What revoking or rotating an app ended: the sessions it minted (deleted) and the live
+/// access tokens created with them (revoked).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct AppCredentialsEnded {
+    pub sessions: u64,
+    pub tokens: u64,
+}
+
+/// Register a linked app that may not mint sessions; returns `(id, "cva_…")` (the key is
+/// shown once).
 pub async fn create_app(
     db: &sqlx::PgPool,
     name: &str,
     allow_import: bool,
     trust_email: bool,
 ) -> ApiResult<(Uuid, String)> {
+    create_app_with(
+        db,
+        name,
+        AppFlags {
+            allow_import,
+            trust_email,
+            allow_sessions: false,
+        },
+    )
+    .await
+}
+
+/// Register a linked app with `flags`; returns `(id, "cva_…")` (the key is shown once).
+pub async fn create_app_with(
+    db: &sqlx::PgPool,
+    name: &str,
+    flags: AppFlags,
+) -> ApiResult<(Uuid, String)> {
     let name = super::clean_name(Some(name), MAX_DISPLAY_NAME_CHARS)
         .ok_or_else(|| ApiError::bad_request("app name must not be empty"))?;
     let id = ids::uuid_v7();
     let (key, digest) = mint(CredentialKind::App);
     sqlx::query(
-        "INSERT INTO apps (id, name, key_sha256, allow_import, trust_email)
-         VALUES ($1, $2, $3, $4, $5)",
+        "INSERT INTO apps (id, name, key_sha256, allow_import, trust_email, allow_sessions)
+         VALUES ($1, $2, $3, $4, $5, $6)",
     )
     .bind(id)
     .bind(name)
     .bind(&digest[..])
-    .bind(allow_import)
-    .bind(trust_email)
+    .bind(flags.allow_import)
+    .bind(flags.trust_email)
+    .bind(flags.allow_sessions)
     .execute(db)
     .await?;
     Ok((id, key))
 }
 
+const APP_ROW_SQL: &str = "
+SELECT a.id, a.name, a.allow_import, a.trust_email, a.allow_sessions, a.created_at,
+       a.last_used_at, a.revoked_at,
+       (SELECT count(*) FROM app_users au WHERE au.app_id = a.id) AS users,
+       (SELECT count(*) FROM sessions s
+        WHERE s.created_by_app = a.id AND s.expires_at > now()) AS live_sessions,
+       (SELECT count(*) FROM access_tokens t
+        WHERE t.created_by_app = a.id AND t.revoked_at IS NULL
+          AND (t.expires_at IS NULL OR t.expires_at > now())) AS live_tokens
+FROM apps a";
+
 /// Every app, newest first.
 pub async fn list_apps(db: &sqlx::PgPool) -> ApiResult<Vec<AppRow>> {
-    Ok(sqlx::query_as(
-        "SELECT a.id, a.name, a.allow_import, a.trust_email, a.created_at, a.last_used_at,
-                a.revoked_at,
-                (SELECT count(*) FROM app_users au WHERE au.app_id = a.id) AS users
-         FROM apps a ORDER BY a.created_at DESC, a.id DESC",
-    )
+    Ok(sqlx::query_as(&format!(
+        "{APP_ROW_SQL} ORDER BY a.created_at DESC, a.id DESC"
+    ))
     .fetch_all(db)
     .await?)
 }
 
-/// Revoke an app's key (its users and their canvases stay). `false` if no such live app.
-pub async fn revoke_app(db: &sqlx::PgPool, id: Uuid) -> ApiResult<bool> {
-    Ok(
-        sqlx::query("UPDATE apps SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL")
-            .bind(id)
-            .execute(db)
-            .await?
-            .rows_affected()
-            > 0,
-    )
+/// One app, `None` if there is no such app.
+pub async fn get_app(db: &sqlx::PgPool, id: Uuid) -> ApiResult<Option<AppRow>> {
+    Ok(sqlx::query_as(&format!("{APP_ROW_SQL} WHERE a.id = $1"))
+        .bind(id)
+        .fetch_optional(db)
+        .await?)
 }
 
-/// Replace an app's key (the old one stops working immediately); returns the new `cva_…`.
-/// Also un-revokes it. `None` if no such app.
-pub async fn rotate_app_key(db: &sqlx::PgPool, id: Uuid) -> ApiResult<Option<String>> {
+/// End everything app `app_id` minted: delete its sessions, then revoke the access tokens
+/// created with them. Run it in the transaction that revokes or rotates the app (holding the
+/// app row): a mint or token creation racing it either commits first and is ended here, or
+/// waits and then sees the app (or its session) gone.
+pub async fn end_app_credentials(
+    conn: &mut sqlx::PgConnection,
+    app_id: Uuid,
+) -> ApiResult<AppCredentialsEnded> {
+    let sessions = sqlx::query("DELETE FROM sessions WHERE created_by_app = $1")
+        .bind(app_id)
+        .execute(&mut *conn)
+        .await?
+        .rows_affected();
+    let tokens = sqlx::query(
+        "UPDATE access_tokens SET revoked_at = now()
+         WHERE created_by_app = $1 AND revoked_at IS NULL",
+    )
+    .bind(app_id)
+    .execute(&mut *conn)
+    .await?
+    .rows_affected();
+    Ok(AppCredentialsEnded { sessions, tokens })
+}
+
+/// Revoke an app's key and end the sessions it minted and the access tokens created with them
+/// ([`end_app_credentials`]); its users and their canvases stay. Revoking an app that is
+/// already revoked ends what it minted again (e.g. sessions minted before 0.2.1 tagged them).
+/// Returns `(was_live, ended)`, `None` if there is no such app.
+pub async fn revoke_app(
+    db: &sqlx::PgPool,
+    id: Uuid,
+) -> ApiResult<Option<(bool, AppCredentialsEnded)>> {
+    let mut tx = db.begin().await?;
+    let live: Option<bool> =
+        sqlx::query_scalar("SELECT revoked_at IS NULL FROM apps WHERE id = $1 FOR UPDATE")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let Some(live) = live else {
+        return Ok(None);
+    };
+    if live {
+        sqlx::query("UPDATE apps SET revoked_at = now() WHERE id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    let ended = end_app_credentials(&mut tx, id).await?;
+    tx.commit().await?;
+    Ok(Some((live, ended)))
+}
+
+/// Replace an app's key (the old one stops working immediately) and un-revoke it; returns the
+/// new `cva_…`. With `end_sessions` (the default for `apps rotate`) also ends what the app
+/// minted ([`end_app_credentials`]) — a leaked key may have minted sessions. `None` if no such
+/// app.
+pub async fn rotate_app_key(
+    db: &sqlx::PgPool,
+    id: Uuid,
+    end_sessions: bool,
+) -> ApiResult<Option<(String, AppCredentialsEnded)>> {
     let (key, digest) = mint(CredentialKind::App);
+    let mut tx = db.begin().await?;
     let n = sqlx::query("UPDATE apps SET key_sha256 = $2, revoked_at = NULL WHERE id = $1")
         .bind(id)
         .bind(&digest[..])
-        .execute(db)
+        .execute(&mut *tx)
         .await?
         .rows_affected();
-    Ok((n > 0).then_some(key))
+    if n == 0 {
+        return Ok(None);
+    }
+    let ended = if end_sessions {
+        end_app_credentials(&mut tx, id).await?
+    } else {
+        AppCredentialsEnded::default()
+    };
+    tx.commit().await?;
+    Ok(Some((key, ended)))
 }
 
 // ---------------------------------------------------------------------------------------------

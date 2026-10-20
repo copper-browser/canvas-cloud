@@ -386,8 +386,9 @@ fn admin_cli_manages_users_settings_and_apps() {
 }
 
 /// Delegated sign-in end to end through the composed app: the provider is listed, `start`
-/// hands the browser to the delegate, the delegate (a `trust_email` linked app) provisions the
-/// person and mints their session, and that token is an ordinary session.
+/// hands the browser to the delegate, the delegate (a linked app with `allow_sessions` and
+/// `trust_email`) provisions the person and mints their session, and that token is an ordinary
+/// session.
 #[tokio::test]
 async fn delegated_sign_in_end_to_end() {
     let toml = format!(
@@ -435,7 +436,12 @@ async fn delegated_sign_in_end_to_end() {
     );
 
     // The delegate signs the person in and mints their session as its linked app.
-    let (app_id, key) = identity::create_app(&st.db, "portal", false, true)
+    let flags = identity::AppFlags {
+        allow_import: false,
+        trust_email: true,
+        allow_sessions: true,
+    };
+    let (app_id, key) = identity::create_app_with(&st.db, "portal", flags)
         .await
         .unwrap();
     let email = format!("dsi-{}@example.test", Uuid::now_v7().simple());
@@ -492,4 +498,258 @@ async fn delegated_sign_in_end_to_end() {
     .await
     .unwrap();
     assert_eq!(audits, 1);
+}
+
+/// One JSON call through the composed app with a bearer credential and an optional body.
+async fn send(
+    app: &Router,
+    method: Method,
+    path: &str,
+    token: &str,
+    body: Value,
+) -> (StatusCode, Value) {
+    let req = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("authorization", format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+/// 0.2.1 security fix, end to end through the admin CLI and the composed app: an app mints
+/// sessions only once an operator sets `--allow-sessions true`; the sessions it mints and the
+/// access tokens created with them are tagged with it; `apps rotate --keep-sessions` keeps them,
+/// `apps rotate` and `apps revoke` end them (audited with counts) and leave the person's own
+/// credentials alone.
+#[test]
+fn app_session_opt_in_and_revocation_through_the_cli() {
+    let dir = temp_dir("cli-sessions");
+    let config = dir.join("canvas-cloud.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "listen = \"127.0.0.1:18482\"\ndatabase_url = \"{}\"\nmaster_key = \"{}\"\nmetrics_listen = \"off\"\n[tls]\nmode = \"off\"\n",
+            database_url(),
+            canvas_cloud_core::ids::b64url(&[7u8; 32]),
+        ),
+    )
+    .unwrap();
+    cli(&config, &["migrate"]).unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let tag = Uuid::now_v7().simple().to_string();
+    let (name, other_name) = (format!("Papers {tag}"), format!("Other {tag}"));
+    let email = format!("opt-{tag}@example.test");
+
+    // Two trust_email apps as 0.2.0 made them (`create_app`: allow_sessions off).
+    let (st, app, app_id, key, other_id, other_key) = rt.block_on(async {
+        let st = state_with(|_| {}).await;
+        let app = canvas_cloud::app(st.clone());
+        let (app_id, key) = identity::create_app(&st.db, &name, false, true)
+            .await
+            .unwrap();
+        let (other_id, other_key) = identity::create_app(&st.db, &other_name, false, true)
+            .await
+            .unwrap();
+        (st, app, app_id, key, other_id, other_key)
+    });
+    let user_path = format!("/v1/apps/self/users/{email}");
+    let mint_path = format!("{user_path}/sessions");
+    let user_id = rt.block_on(async {
+        let (s, v) = send(
+            &app,
+            Method::PUT,
+            &user_path,
+            &key,
+            json!({ "email": email }),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        let (s, v) = send(
+            &app,
+            Method::PUT,
+            &user_path,
+            &other_key,
+            json!({ "email": email }),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        let (s, v) = send(&app, Method::POST, &mint_path, &key, json!({})).await;
+        assert_eq!(
+            (s, v["error"].as_str()),
+            (StatusCode::FORBIDDEN, Some("sessions_not_allowed")),
+            "{v}"
+        );
+        identity::user_id_by_email(&st.db, &email)
+            .await
+            .unwrap()
+            .unwrap()
+    });
+
+    // The operator opts the app in by name (`set`), the other one by id (`update` alias).
+    cli(
+        &config,
+        &[
+            "apps",
+            "set",
+            &name.to_lowercase(),
+            "--allow-sessions",
+            "true",
+        ],
+    )
+    .unwrap();
+    cli(&config, &["apps", "show", &name]).unwrap();
+    cli(
+        &config,
+        &[
+            "apps",
+            "update",
+            &other_id.to_string(),
+            "--allow-sessions",
+            "true",
+        ],
+    )
+    .unwrap();
+    cli(&config, &["apps", "list"]).unwrap();
+    assert!(cli(&config, &["apps", "show", "no such app here"]).is_err());
+
+    // Mint a session; the person makes an access token with it. Both are tagged. The person's
+    // own session and token are not.
+    let mint_and_token = |key: String| {
+        let app = app.clone();
+        let mint_path = mint_path.clone();
+        async move {
+            let (s, v) = send(&app, Method::POST, &mint_path, &key, json!({})).await;
+            assert_eq!(s, StatusCode::CREATED, "{v}");
+            let session = v["token"].as_str().unwrap().to_owned();
+            let (s, v) = send(
+                &app,
+                Method::POST,
+                "/v1/tokens",
+                &session,
+                json!({ "name": "agent", "scope": "write" }),
+            )
+            .await;
+            assert_eq!(s, StatusCode::CREATED, "{v}");
+            (session, v["token"].as_str().unwrap().to_owned())
+        }
+    };
+    let alive = |token: String| {
+        let app = app.clone();
+        async move { call(&app, Method::GET, "/v1/auth/me", Some(&token)).await.0 == StatusCode::OK }
+    };
+    let (minted, minted_token, own, own_token) = rt.block_on(async {
+        let (minted, minted_token) = mint_and_token(key.clone()).await;
+        let own = identity::create_session(&st.db, user_id, None)
+            .await
+            .unwrap();
+        let (s, v) = send(
+            &app,
+            Method::POST,
+            "/v1/tokens",
+            &own,
+            json!({ "name": "mine", "scope": "read" }),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CREATED, "{v}");
+        let own_token = v["token"].as_str().unwrap().to_owned();
+        let tags: Vec<(String, Option<Uuid>)> = sqlx::query_as(
+            "SELECT name, created_by_app FROM access_tokens WHERE user_id = $1 ORDER BY name",
+        )
+        .bind(user_id)
+        .fetch_all(&st.db)
+        .await
+        .unwrap();
+        assert_eq!(
+            tags,
+            vec![
+                ("agent".to_owned(), Some(app_id)),
+                ("mine".to_owned(), None)
+            ]
+        );
+        (minted, minted_token, own, own_token)
+    });
+
+    // Routine rotation keeps them; the default rotation ends them.
+    cli(&config, &["apps", "rotate", &name, "--keep-sessions"]).unwrap();
+    rt.block_on(async {
+        assert!(alive(minted.clone()).await && alive(minted_token.clone()).await);
+    });
+    cli(&config, &["apps", "rotate", &app_id.to_string()]).unwrap();
+    rt.block_on(async {
+        assert!(!alive(minted.clone()).await, "minted session ends");
+        assert!(!alive(minted_token.clone()).await, "its token is revoked");
+        assert!(alive(own.clone()).await && alive(own_token.clone()).await);
+    });
+
+    // Revoking the other app ends what it minted.
+    let (other_minted, other_token) = rt.block_on(mint_and_token(other_key.clone()));
+    cli(&config, &["apps", "revoke", &other_name]).unwrap();
+    rt.block_on(async {
+        assert!(!alive(other_minted).await && !alive(other_token).await);
+        assert!(alive(own).await && alive(own_token).await);
+        let (s, _) = send(&app, Method::POST, &mint_path, &other_key, json!({})).await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED);
+
+        // Audited with the counts.
+        let audit = |action: &'static str, id: Uuid| {
+            let db = st.db.clone();
+            async move {
+                sqlx::query_scalar::<_, Value>(
+                    "SELECT detail FROM admin_audit WHERE actor = 'cli' AND action = $1
+                     AND target = $2 ORDER BY id",
+                )
+                .bind(action)
+                .bind(id.to_string())
+                .fetch_all(&db)
+                .await
+                .unwrap()
+            }
+        };
+        assert_eq!(
+            audit("app.rotate", app_id).await,
+            vec![
+                json!({ "keep_sessions": true, "sessions_ended": 0, "tokens_revoked": 0 }),
+                json!({ "keep_sessions": false, "sessions_ended": 1, "tokens_revoked": 1 }),
+            ]
+        );
+        assert_eq!(
+            audit("app.revoke", other_id).await,
+            vec![json!({ "already_revoked": false, "sessions_ended": 1, "tokens_revoked": 1 })]
+        );
+        let set = audit("app.set", app_id).await;
+        assert_eq!(set.last().unwrap()["allow_sessions"], true);
+    });
+
+    // A name several apps share needs the id, unless only one of them is live.
+    let twin = format!("Twin {tag}");
+    let first = rt.block_on(async {
+        let (a, _) = identity::create_app(&st.db, &twin, false, true)
+            .await
+            .unwrap();
+        identity::create_app(&st.db, &twin, false, true)
+            .await
+            .unwrap();
+        a
+    });
+    assert!(cli(&config, &["apps", "show", &twin]).is_err());
+    cli(&config, &["apps", "revoke", &first.to_string()]).unwrap();
+    cli(&config, &["apps", "set", &twin, "--allow-import", "true"]).unwrap();
+    rt.block_on(async {
+        let imports: Vec<bool> =
+            sqlx::query_scalar("SELECT allow_import FROM apps WHERE name = $1 ORDER BY created_at")
+                .bind(&twin)
+                .fetch_all(&st.db)
+                .await
+                .unwrap();
+        assert_eq!(imports, vec![false, true], "the live twin");
+    });
+    std::fs::remove_dir_all(&dir).unwrap();
 }

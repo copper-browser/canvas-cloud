@@ -1,5 +1,6 @@
-//! `POST /v1/apps/self/users/{subject}/sessions`: a `trust_email` app signs one of its users
-//! in (an ordinary `cvs_…` session), and every way that is refused.
+//! `POST /v1/apps/self/users/{subject}/sessions`: an app with `allow_sessions` and
+//! `trust_email` signs one of its users in (a `cvs_…` session tagged with the app), and every
+//! way that is refused.
 
 #![allow(clippy::too_many_lines, clippy::many_single_char_names)]
 
@@ -7,7 +8,7 @@ mod common;
 
 use axum::body::Body;
 use axum::http::{HeaderMap, Method, Request, StatusCode};
-use canvas_cloud_core::identity::credential_digest;
+use canvas_cloud_core::identity::{credential_digest, AppFlags};
 use common::{App, Caller, TestApp};
 use http_body_util::BodyExt as _;
 use serde_json::{json, Value};
@@ -62,9 +63,9 @@ fn session(token: &str) -> Caller {
 }
 
 #[tokio::test]
-async fn a_trusting_app_signs_its_user_in() {
+async fn an_allowed_app_signs_its_user_in() {
     let t = TestApp::new().await;
-    let app = t.app(false, true).await;
+    let app = t.signing_app().await;
     let ann = t.provision(&app, "ann").await;
     let ann_id = ann.user_id.unwrap();
 
@@ -79,19 +80,24 @@ async fn a_trusting_app_signs_its_user_in() {
     assert!((29 * 24..=30 * 24).contains(&hours), "{v}");
     assert_eq!(v.as_object().unwrap().len(), 3, "{v}");
 
-    // An ordinary session row: same table and expiry as login / OIDC.
-    let (uid, ua, live): (Uuid, Option<String>, bool) = sqlx::query_as(
-        "SELECT user_id, user_agent,
-                expires_at BETWEEN now() + interval '29 days' AND now() + interval '30 days'
-         FROM sessions WHERE token_sha256 = $1",
-    )
-    .bind(&credential_digest(&token)[..])
-    .fetch_one(t.db())
-    .await
-    .unwrap();
+    // A session row like login / OIDC (same table and expiry), tagged with the app and capped
+    // at limits.app_session_ttl_hours (720 = 30 days) after the mint.
+    let (uid, ua, live, by, capped): (Uuid, Option<String>, bool, Option<Uuid>, bool) =
+        sqlx::query_as(
+            "SELECT user_id, user_agent,
+                    expires_at BETWEEN now() + interval '29 days' AND now() + interval '30 days',
+                    created_by_app,
+                    max_expires_at BETWEEN now() + interval '719 hours'
+                                       AND now() + interval '720 hours'
+             FROM sessions WHERE token_sha256 = $1",
+        )
+        .bind(&credential_digest(&token)[..])
+        .fetch_one(t.db())
+        .await
+        .unwrap();
     assert_eq!(
-        (uid, ua.as_deref(), live),
-        (ann_id, Some("sessions-tests/1"), true)
+        (uid, ua.as_deref(), live, by, capped),
+        (ann_id, Some("sessions-tests/1"), true, Some(app.id), true)
     );
 
     // The token is the person's own credential: no app key, no X-Canvas-User.
@@ -152,7 +158,7 @@ async fn a_trusting_app_signs_its_user_in() {
 #[tokio::test]
 async fn refusals() {
     let t = TestApp::new().await;
-    let app = t.app(false, true).await;
+    let app = t.signing_app().await;
     let ann = t.provision(&app, "ann").await;
 
     // Only the app as itself: X-Canvas-User → 400; a person's session → 401.
@@ -166,15 +172,63 @@ async fn refusals() {
     let (s, _, v) = mint_raw(&t, &session(v["token"].as_str().unwrap()), "ann", None).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED, "{v}");
 
-    // An app that does not trust email may not sign people in.
+    // Session minting is an operator's opt-in: an app without allow_sessions may not sign
+    // people in even when it trusts email (every app created before 0.2.1).
+    let trusting = t.app(false, true).await;
+    t.provision(&trusting, "ann").await;
+    let (s, v) = mint(&t, &trusting, "ann").await;
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (StatusCode::FORBIDDEN, Some("sessions_not_allowed")),
+        "{v}"
+    );
     let wary = t.app(false, false).await;
     t.provision(&wary, "ann").await;
     let (s, v) = mint(&t, &wary, "ann").await;
     assert_eq!(
         (s, v["error"].as_str()),
+        (StatusCode::FORBIDDEN, Some("sessions_not_allowed")),
+        "{v}"
+    );
+    // allow_sessions without trust_email is not enough either.
+    let half = t
+        .app_with(AppFlags {
+            allow_import: false,
+            trust_email: false,
+            allow_sessions: true,
+        })
+        .await;
+    t.provision(&half, "ann").await;
+    let (s, v) = mint(&t, &half, "ann").await;
+    assert_eq!(
+        (s, v["error"].as_str()),
         (StatusCode::FORBIDDEN, Some("trust_email_required")),
         "{v}"
     );
+    // Turning allow_sessions off stops new sign-ins at once (no cached policy).
+    sqlx::query("UPDATE apps SET allow_sessions = false WHERE id = $1")
+        .bind(app.id)
+        .execute(t.db())
+        .await
+        .unwrap();
+    let (s, v) = mint(&t, &app, "ann").await;
+    assert_eq!(
+        (s, v["error"].as_str()),
+        (StatusCode::FORBIDDEN, Some("sessions_not_allowed")),
+        "{v}"
+    );
+    sqlx::query("UPDATE apps SET allow_sessions = true WHERE id = $1")
+        .bind(app.id)
+        .execute(t.db())
+        .await
+        .unwrap();
+    let no_session: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM sessions WHERE created_by_app = ANY($1)")
+            .bind(vec![trusting.id, wary.id, half.id])
+            .fetch_one(t.db())
+            .await
+            .unwrap();
+    assert_eq!(no_session, 0, "refused mints leave no session");
 
     // Unknown subject — including another app's user.
     let (s, v) = mint(&t, &app, "nobody").await;
@@ -183,7 +237,7 @@ async fn refusals() {
         (StatusCode::NOT_FOUND, Some("unknown_subject")),
         "{v}"
     );
-    let other = t.app(false, true).await;
+    let other = t.signing_app().await;
     t.provision(&other, "zed").await;
     let (s, v) = mint(&t, &app, "zed").await;
     assert_eq!(
@@ -212,19 +266,72 @@ async fn refusals() {
     let (s, _, v) = mint_raw(&t, &app.me(), "ben", Some("nope")).await;
     assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
 
-    // A revoked app key.
-    canvas_cloud_core::identity::revoke_app(t.db(), app.id)
+    // A revoked app key: no more mints, and the sessions it minted end with it.
+    let (s, v) = mint(&t, &app, "ben").await;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
+    let ben = session(v["token"].as_str().unwrap());
+    let (s, _) = t.get(&ben, "/canvases").await;
+    assert_eq!(s, StatusCode::OK);
+    let (was_live, ended) = canvas_cloud_core::identity::revoke_app(t.db(), app.id)
         .await
+        .unwrap()
         .unwrap();
+    assert!(was_live);
+    assert!(ended.sessions >= 1, "{ended:?}");
     let (s, v) = mint(&t, &app, "ben").await;
     assert_eq!(s, StatusCode::UNAUTHORIZED, "{v}");
+    let (s, _) = t.get(&ben, "/canvases").await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn rotation_ends_minted_sessions_unless_kept() {
+    let t = TestApp::new().await;
+    let app = t.signing_app().await;
+    let ann = t.provision(&app, "ann").await;
+    let (s, v) = mint(&t, &app, "ann").await;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
+    let minted = session(v["token"].as_str().unwrap());
+    // The person signed in on their own too (not through the app).
+    let own = session(
+        &canvas_cloud_core::identity::create_session(t.db(), ann.user_id.unwrap(), None)
+            .await
+            .unwrap(),
+    );
+
+    let (key, ended) = canvas_cloud_core::identity::rotate_app_key(t.db(), app.id, false)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((ended.sessions, ended.tokens), (0, 0));
+    let (s, _) = t.get(&minted, "/canvases").await;
+    assert_eq!(s, StatusCode::OK, "--keep-sessions keeps them");
+    // The old key is dead; the new one mints.
+    let (s, _) = mint(&t, &app, "ann").await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    let app = App { id: app.id, key };
+    let (s, v) = mint(&t, &app, "ann").await;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
+    let second = session(v["token"].as_str().unwrap());
+
+    let (_, ended) = canvas_cloud_core::identity::rotate_app_key(t.db(), app.id, true)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((ended.sessions, ended.tokens), (2, 0));
+    for c in [&minted, &second] {
+        let (s, _) = t.get(c, "/canvases").await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED);
+    }
+    let (s, _) = t.get(&own, "/canvases").await;
+    assert_eq!(s, StatusCode::OK, "only what the app minted ends");
 }
 
 #[tokio::test]
 async fn rate_limited_per_app() {
     let t = TestApp::with(|c| c.limits.app_sessions_per_minute = 2).await;
-    let app = t.app(false, true).await;
-    let other = t.app(false, true).await;
+    let app = t.signing_app().await;
+    let other = t.signing_app().await;
     t.provision(&app, "ann").await;
     t.provision(&other, "ben").await;
     for _ in 0..2 {

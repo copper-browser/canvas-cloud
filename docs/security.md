@@ -14,8 +14,10 @@ vulnerability, see [SECURITY.md](../SECURITY.md).
   read).
 - A reverse proxy in front, **only** when `trust_proxy = true`.
 - Linked apps (`cva_…` keys): an app can create users and act as any user it provisioned, and
-  with `trust_email` it can link an existing account by email. Give app keys only to servers
-  you trust as much as the accounts they will act for ([apps.md](apps.md)).
+  with `trust_email` it can link an existing account by email. With `allow_sessions` as well
+  (off unless an operator turns it on) it can also sign any of those people in with a full
+  session — so such a key can become anyone it can link by email. Give app keys only to
+  servers you trust as much as the accounts they will act for ([apps.md](apps.md)).
 
 **Defended against**
 
@@ -98,8 +100,12 @@ at start with the database password and master key redacted.
   or in `Referer`. A [delegated sign-in](auth.md#delegated-sign-in) `start` accepts only
   `public_url`'s origin, and the delegate must apply the same rule before it appends a token.
 - **Sessions minted by linked apps** (`POST /v1/apps/self/users/{subject}/sessions`) need
-  an app with `trust_email` (which already vouches for its users' email addresses), are
-  limited per app, audited, and answered with `Cache-Control: no-store`.
+  an app an operator opted in with `allow_sessions` that also has `trust_email` (which
+  already vouches for its users' email addresses). They are limited per app, audited,
+  answered with `Cache-Control: no-store`, live at most `limits.app_session_ttl_hours`
+  (default 720), and tagged with the app, as are access tokens created with them:
+  `apps revoke` and `apps rotate` end them all (`--keep-sessions` keeps them on a routine
+  rotation).
 
 ## Rate limits
 

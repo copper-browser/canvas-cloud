@@ -60,11 +60,14 @@ with actor `cli`.
 | `admin users delete --email E [--yes]` | delete the user, the canvases they own and their memberships (asks unless `--yes`; without a terminal it needs `--yes`) |
 | `admin settings get` | show `allow_signup` and `signup_domains` |
 | `admin settings set allow_signup true\|false` / `set signup_domains a.com,b.com` | the signup policy ([auth.md](auth.md#signup-policy)) |
-| `apps create --name N [--allow-import] [--no-trust-email]` | register a linked app; prints its `cva_…` key once |
-| `apps list` | linked apps (never their keys) |
-| `apps set ID [--allow-import true\|false] [--trust-email true\|false]` | change an app's policy |
-| `apps rotate ID` | new key, printed once; the old key stops working |
-| `apps revoke ID` | disable the app's key (its users and canvases stay) |
+| `apps create --name N [--allow-import] [--no-trust-email] [--allow-sessions]` | register a linked app; prints its `cva_…` key once |
+| `apps list` | linked apps (never their keys): status, policy, whether each may sign users in, users, canvases, live sessions/tokens it minted |
+| `apps show APP` | one app's policy, whether it may sign users in, and the live sessions and tokens it minted |
+| `apps set APP [--allow-import true\|false] [--trust-email true\|false] [--allow-sessions true\|false]` | change an app's policy (`apps update` is the same command) |
+| `apps rotate APP [--keep-sessions]` | new key, printed once; the old key stops working, and the sessions the app minted and the tokens created with them end (kept with `--keep-sessions`) |
+| `apps revoke APP` | disable the app's key and end the sessions it minted and the tokens created with them (its users and canvases stay) |
+
+`APP` is an app id or name (case-insensitive; a name several live apps share needs the id).
 
 `--password-file` reads the first line of a file, or of stdin with `-`; passwords are never
 command-line arguments.
@@ -98,6 +101,7 @@ Checks the installation and exits non-zero if any check fails:
 | `database` | it cannot connect within 10 s | |
 | `migrations` | migrations are pending (run `canvas-cloud migrate`) | |
 | `accounts` | | (informational: users, live sessions, linked apps, signup state) |
+| `app-sessions` | | an app has `allow_sessions` but not `trust_email`; `[[delegated_sign_in]]` is configured but no app may sign users in. Otherwise lists each app that may sign users in (mint `cvs_` sessions) and its live minted sessions |
 | `tls` | `self-signed`: the certificate is missing, expired or does not match the key | `off`; `self-signed` expiring within 30 days or not naming the `public_url` host; `acme` cache not created yet, or the port is not 443 |
 | `listener` | `/healthz` on the listen address does not answer `200 ok` (with `self-signed`, the presented certificate must be the configured one) | |
 | `web` | `web_root` is set but is not a directory with `index.html` | |
@@ -208,13 +212,37 @@ Migrations only go forward. A binary refuses to start (`migration N was previous
 but is missing in the resolved migrations`) on a database that a newer version has
 migrated. To downgrade across a migration, restore the backup taken before the upgrade.
 
+### Upgrading to 0.2.1
+
+`0007_app_sessions_opt_in` adds `apps.allow_sessions` (off for every existing app) and tags
+sessions and access tokens with the app that minted them. After the upgrade **no linked app
+can mint sessions** until you opt it in, so a [delegated sign-in](auth.md#delegated-sign-in)
+provider fails with `403 sessions_not_allowed` until then:
+
+```sh
+sudo canvas-cloud apps list                                # which app the provider uses
+sudo canvas-cloud apps set "Team portal" --allow-sessions true
+sudo canvas-cloud doctor                                   # app-sessions lists it
+```
+
+Sessions minted before the upgrade are tagged from the `app.user.session` audit rows (best
+effort: a sign-in by other means within five seconds before a mint is tagged too).
+Access tokens created before the upgrade are never tagged.
+
 ## Keys and credentials
 
 - **Master key: rotation is not supported** in v0.1.0. There is no command that re-wraps the
   canvas keys under a new master key, and changing `master_key` makes every existing canvas
   unreadable. Never run `gen-config --force` over a live config: it writes a new key.
-- **App keys**: `canvas-cloud apps rotate <id>` prints a new `cva_…` key once; the old one
-  stops working at once. `apps revoke <id>` disables the app (its users and canvases stay).
+- **App keys**: `canvas-cloud apps rotate <app>` prints a new `cva_…` key once; the old one
+  stops working at once. `apps revoke <app>` disables the app (its users and canvases stay).
+  Both also end what the app minted — every session it signed a user in with, and every
+  access token created while signed in with one — and print and audit the counts
+  (`app.rotate` / `app.revoke`: `sessions_ended`, `tokens_revoked`). That is the incident
+  response for a leaked key. For routine rotation of a key that is not suspected,
+  `apps rotate <app> --keep-sessions` leaves those people signed in. Only apps with
+  `allow_sessions` (see `apps list`, `doctor`) can mint sessions at all; minted sessions also
+  end `limits.app_session_ttl_hours` (default 720) after the mint.
 - **People**: `admin users disable --email …` blocks sign-in and revokes sessions and
   tokens; `admin users set-password --email … --password-file …` revokes every session.
   Because the CLI is a separate process, sockets that are already open stay open until they

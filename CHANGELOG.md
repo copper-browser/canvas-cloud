@@ -5,6 +5,56 @@ before 1.0, breaking changes to the client contract (see
 [docs/v0.1.0.md](docs/v0.1.0.md#compatibility)) only come with a new minor version and are
 listed under **Breaking**.
 
+## 0.2.1
+
+Security fix for app-minted sessions (0.2.0). Upgrade every 0.2.0 server. It is breaking for
+operators in a patch release because it closes a security hole; the client contract is
+unchanged.
+
+### Security
+
+- In 0.2.0 every linked app with `trust_email` — the default, so every existing app key —
+  could mint a full `cvs_` session (`POST /v1/apps/self/users/{subject}/sessions`) for any
+  user it could provision, including any existing account it could link by email. A minted
+  session could create access tokens (also ones that never expire), and neither
+  `apps revoke` nor `apps rotate` ended those sessions or tokens. Now:
+  - minting needs the new per-app opt-in `allow_sessions` as well as `trust_email`;
+    otherwise `403 sessions_not_allowed`. It is off by default.
+  - minted sessions carry `sessions.created_by_app`, and access tokens created while
+    signed in with one carry `access_tokens.created_by_app`.
+  - `canvas-cloud apps revoke <app>` deletes those sessions and revokes those tokens.
+    `apps rotate <app>` does too, unless `--keep-sessions` is given (for routine rotation).
+    Both print the counts and audit them (`app.revoke` / `app.rotate`: `sessions_ended`,
+    `tokens_revoked`). Revoking an already revoked app ends anything still tagged with it.
+  - a mint, or a token creation from a minted session, racing a revoke or rotate either
+    commits first and is ended, or is refused.
+  - minted sessions live at most `limits.app_session_ttl_hours` (default 720, i.e. 30 days;
+    `0` = no cap) after the mint, however much they are used. They still end 30 days after
+    their last use.
+
+### Breaking
+
+- **Existing apps lose session minting until an operator opts them in.** Migration
+  `0007_app_sessions_opt_in` adds `apps.allow_sessions` (default `false`), so a
+  [delegated sign-in](docs/auth.md#delegated-sign-in) provider fails with
+  `403 sessions_not_allowed` after the upgrade until you run
+  `canvas-cloud apps set <app> --allow-sessions true`. `canvas-cloud doctor` lists the apps
+  that may sign users in, and warns when `[[delegated_sign_in]]` is configured but none may.
+  See [docs/operations.md](docs/operations.md#upgrading-to-021).
+- `apps rotate` now ends the sessions the app minted (and the tokens created with them);
+  pass `--keep-sessions` for the old behaviour.
+
+### Added
+
+- `apps create --allow-sessions`, `apps set … --allow-sessions true|false` (also as
+  `apps update`), and `apps show <app>`. Every `apps` subcommand takes an app id or name
+  (case-insensitive). `apps list` shows whether each app may sign users in and the live
+  sessions and tokens it minted.
+- `GET /v1/apps/self/stats` → `app` gains `allow_sessions`; `GET /v1/info` → `limits` gains
+  `app_session_ttl_hours`.
+- The migration tags sessions minted before the upgrade from the `app.user.session` audit rows
+  (best effort). Access tokens created before the upgrade stay untagged.
+
 ## 0.2.0
 
 Server-side ops parity with Canvas App (65803aa), and delegated sign-in.

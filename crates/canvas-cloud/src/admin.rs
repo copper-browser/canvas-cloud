@@ -46,37 +46,114 @@ pub async fn apps(cfg: &Config, cmd: AppsCommand) -> anyhow::Result<()> {
     result
 }
 
-/// `canvas-cloud apps set <id> [--allow-import true|false] [--trust-email true|false]`.
-async fn set_app(
-    pool: &PgPool,
-    id: Uuid,
-    allow_import: Option<bool>,
-    trust_email: Option<bool>,
-) -> anyhow::Result<()> {
-    if allow_import.is_none() && trust_email.is_none() {
-        bail!("nothing to set (use --allow-import true|false and/or --trust-email true|false)");
+/// The app named by `reference`: an id, or a name (case-insensitive). When several apps share
+/// the name, the one live app among them; otherwise the id is required.
+async fn resolve_app(pool: &PgPool, reference: &str) -> anyhow::Result<(Uuid, String)> {
+    let reference = reference.trim();
+    if let Ok(id) = Uuid::parse_str(reference) {
+        let name: Option<String> = sqlx::query_scalar("SELECT name FROM apps WHERE id = $1")
+            .bind(id)
+            .fetch_optional(pool)
+            .await?;
+        return name
+            .map(|name| (id, name))
+            .ok_or_else(|| anyhow!("no app {id}"));
     }
-    let row: Option<(bool, bool)> = sqlx::query_as(
+    let rows: Vec<(Uuid, String, bool)> = sqlx::query_as(
+        "SELECT id, name, revoked_at IS NULL FROM apps WHERE lower(name) = lower($1)
+         ORDER BY created_at DESC, id DESC",
+    )
+    .bind(reference)
+    .fetch_all(pool)
+    .await?;
+    let live: Vec<&(Uuid, String, bool)> = rows.iter().filter(|r| r.2).collect();
+    match (rows.as_slice(), live.as_slice()) {
+        ([], _) => bail!("no app named {reference:?} (see `canvas-cloud apps list`)"),
+        ([(id, name, _)], _) | (_, [(id, name, _)]) => Ok((*id, name.clone())),
+        _ => bail!(
+            "{} apps are named {reference:?}; give the id: {}",
+            rows.len(),
+            rows.iter()
+                .map(|r| r.0.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+/// `canvas-cloud apps set <app> [--allow-import true|false] [--trust-email true|false]
+/// [--allow-sessions true|false]`.
+async fn set_app(pool: &PgPool, reference: &str, flags: AppFlagChanges) -> anyhow::Result<()> {
+    if flags.allow_import.is_none() && flags.trust_email.is_none() && flags.allow_sessions.is_none()
+    {
+        bail!(
+            "nothing to set (use --allow-import, --trust-email and/or --allow-sessions true|false)"
+        );
+    }
+    let (id, name) = resolve_app(pool, reference).await?;
+    let row: Option<(bool, bool, bool)> = sqlx::query_as(
         "UPDATE apps SET allow_import = coalesce($2, allow_import),
-                         trust_email = coalesce($3, trust_email)
-         WHERE id = $1 RETURNING allow_import, trust_email",
+                         trust_email = coalesce($3, trust_email),
+                         allow_sessions = coalesce($4, allow_sessions)
+         WHERE id = $1 RETURNING allow_import, trust_email, allow_sessions",
     )
     .bind(id)
-    .bind(allow_import)
-    .bind(trust_email)
+    .bind(flags.allow_import)
+    .bind(flags.trust_email)
+    .bind(flags.allow_sessions)
     .fetch_optional(pool)
     .await?;
-    let (allow_import, trust_email) = row.ok_or_else(|| anyhow!("no app {id}"))?;
+    let (allow_import, trust_email, allow_sessions) = row.ok_or_else(|| anyhow!("no app {id}"))?;
     identity::audit(
         pool,
         ACTOR,
         "app.set",
         &id.to_string(),
-        json!({ "allow_import": allow_import, "trust_email": trust_email }),
+        json!({
+            "allow_import": allow_import,
+            "trust_email": trust_email,
+            "allow_sessions": allow_sessions,
+        }),
     )
     .await;
-    println!("app {id}: allow_import={allow_import} trust_email={trust_email}");
+    println!(
+        "app {id} ({name}): allow_import={allow_import} trust_email={trust_email} allow_sessions={allow_sessions}"
+    );
+    if allow_sessions && !trust_email {
+        eprintln!("note: the app cannot sign users in until trust_email is true as well");
+    }
+    if flags.allow_sessions == Some(false) {
+        eprintln!(
+            "note: sessions it already minted stay signed in; `canvas-cloud apps rotate {id}` ends them"
+        );
+    }
     Ok(())
+}
+
+/// The `--allow-import` / `--trust-email` / `--allow-sessions` of `apps set` (`None` = keep).
+#[derive(Clone, Copy, Debug, Default)]
+struct AppFlagChanges {
+    allow_import: Option<bool>,
+    trust_email: Option<bool>,
+    allow_sessions: Option<bool>,
+}
+
+fn yes_no(b: bool) -> &'static str {
+    if b {
+        "yes"
+    } else {
+        "no"
+    }
+}
+
+/// Why an app can or cannot sign its users in, for `apps show`.
+fn session_status(a: &identity::AppRow) -> &'static str {
+    match (a.revoked_at.is_some(), a.allow_sessions, a.trust_email) {
+        (true, _, _) => "no (revoked)",
+        (false, true, true) => "yes",
+        (false, true, false) => "no (allow_sessions is on but trust_email is off)",
+        (false, false, _) => "no (allow_sessions is off)",
+    }
 }
 
 async fn find_user(pool: &PgPool, email: &str) -> anyhow::Result<Uuid> {
@@ -290,14 +367,24 @@ async fn settings(pool: &PgPool, cmd: SettingsCommand) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)] // one arm per subcommand
 async fn apps_cmd(pool: &PgPool, cmd: AppsCommand) -> anyhow::Result<()> {
     match cmd {
         AppsCommand::Create {
             name,
             allow_import,
             no_trust_email,
+            allow_sessions,
         } => {
-            let (id, key) = identity::create_app(pool, &name, allow_import, !no_trust_email)
+            if allow_sessions && no_trust_email {
+                bail!("--allow-sessions needs trust_email (drop --no-trust-email)");
+            }
+            let flags = identity::AppFlags {
+                allow_import,
+                trust_email: !no_trust_email,
+                allow_sessions,
+            };
+            let (id, key) = identity::create_app_with(pool, &name, flags)
                 .await
                 .map_err(api_err)?;
             identity::audit(
@@ -305,7 +392,12 @@ async fn apps_cmd(pool: &PgPool, cmd: AppsCommand) -> anyhow::Result<()> {
                 ACTOR,
                 "app.create",
                 &id.to_string(),
-                json!({ "name": name, "allow_import": allow_import, "trust_email": !no_trust_email }),
+                json!({
+                    "name": name,
+                    "allow_import": flags.allow_import,
+                    "trust_email": flags.trust_email,
+                    "allow_sessions": flags.allow_sessions,
+                }),
             )
             .await;
             eprintln!("created app {id} ({name}); its key is shown once:");
@@ -322,13 +414,23 @@ async fn apps_cmd(pool: &PgPool, cmd: AppsCommand) -> anyhow::Result<()> {
             .await?
             .into_iter()
             .collect();
+            // `sessions`: may sign its users in (allow_sessions + trust_email, live);
+            // `minted`: live sessions it minted / live access tokens created with them.
             println!(
-                "{:<36}  {:<24}  {:<7}  {:<6}  {:<6}  {:>6}  {:>8}  last used",
-                "id", "name", "status", "import", "email", "users", "canvases"
+                "{:<36}  {:<24}  {:<7}  {:<6}  {:<6}  {:<8}  {:>6}  {:>8}  {:>9}  last used",
+                "id",
+                "name",
+                "status",
+                "import",
+                "email",
+                "sessions",
+                "users",
+                "canvases",
+                "minted"
             );
             for a in &rows {
                 println!(
-                    "{}  {:<24}  {:<7}  {:<6}  {:<6}  {:>6}  {:>8}  {}",
+                    "{}  {:<24}  {:<7}  {:<6}  {:<6}  {:<8}  {:>6}  {:>8}  {:>9}  {}",
                     a.id,
                     a.name,
                     if a.revoked_at.is_some() {
@@ -336,34 +438,114 @@ async fn apps_cmd(pool: &PgPool, cmd: AppsCommand) -> anyhow::Result<()> {
                     } else {
                         "active"
                     },
-                    if a.allow_import { "yes" } else { "no" },
+                    yes_no(a.allow_import),
                     if a.trust_email { "trust" } else { "strict" },
+                    yes_no(a.can_mint_sessions()),
                     a.users,
                     canvases.get(&a.id).copied().unwrap_or(0),
+                    format!("{}/{}", a.live_sessions, a.live_tokens),
                     a.last_used_at.map_or_else(|| "never".into(), ts),
                 );
             }
             println!("{} app(s)", rows.len());
         }
-        AppsCommand::Revoke { id } => {
-            if !identity::revoke_app(pool, id).await.map_err(api_err)? {
-                bail!("no live app {id}");
-            }
-            identity::audit(pool, ACTOR, "app.revoke", &id.to_string(), json!({})).await;
-            println!("revoked app {id}");
-        }
-        AppsCommand::Set {
-            id,
-            allow_import,
-            trust_email,
-        } => set_app(pool, id, allow_import, trust_email).await?,
-        AppsCommand::Rotate { id } => {
-            let key = identity::rotate_app_key(pool, id)
+        AppsCommand::Show { app } => {
+            let (id, _) = resolve_app(pool, &app).await?;
+            let a = identity::get_app(pool, id)
                 .await
                 .map_err(api_err)?
                 .ok_or_else(|| anyhow!("no app {id}"))?;
-            identity::audit(pool, ACTOR, "app.rotate", &id.to_string(), json!({})).await;
-            eprintln!("rotated app {id}; the new key is shown once:");
+            println!("id              {}", a.id);
+            println!("name            {}", a.name);
+            println!(
+                "status          {}",
+                a.revoked_at
+                    .map_or_else(|| "active".into(), |t| format!("revoked {}", ts(t)))
+            );
+            println!("allow_import    {}", a.allow_import);
+            println!("trust_email     {}", a.trust_email);
+            println!("allow_sessions  {}", a.allow_sessions);
+            println!("can sign in     {}", session_status(&a));
+            println!("users           {}", a.users);
+            println!("minted sessions {} live", a.live_sessions);
+            println!("minted tokens   {} live", a.live_tokens);
+            println!("created         {}", ts(a.created_at));
+            println!(
+                "last used       {}",
+                a.last_used_at.map_or_else(|| "never".into(), ts)
+            );
+        }
+        AppsCommand::Revoke { app } => {
+            let (id, name) = resolve_app(pool, &app).await?;
+            let (was_live, ended) = identity::revoke_app(pool, id)
+                .await
+                .map_err(api_err)?
+                .ok_or_else(|| anyhow!("no app {id}"))?;
+            identity::audit(
+                pool,
+                ACTOR,
+                "app.revoke",
+                &id.to_string(),
+                json!({
+                    "already_revoked": !was_live,
+                    "sessions_ended": ended.sessions,
+                    "tokens_revoked": ended.tokens,
+                }),
+            )
+            .await;
+            println!(
+                "{} app {id} ({name}); ended {} session(s) it minted and revoked {} access token(s) created with them",
+                if was_live { "revoked" } else { "already revoked:" },
+                ended.sessions,
+                ended.tokens,
+            );
+        }
+        AppsCommand::Set {
+            app,
+            allow_import,
+            trust_email,
+            allow_sessions,
+        } => {
+            set_app(
+                pool,
+                &app,
+                AppFlagChanges {
+                    allow_import,
+                    trust_email,
+                    allow_sessions,
+                },
+            )
+            .await?;
+        }
+        AppsCommand::Rotate { app, keep_sessions } => {
+            let (id, name) = resolve_app(pool, &app).await?;
+            let (key, ended) = identity::rotate_app_key(pool, id, !keep_sessions)
+                .await
+                .map_err(api_err)?
+                .ok_or_else(|| anyhow!("no app {id}"))?;
+            identity::audit(
+                pool,
+                ACTOR,
+                "app.rotate",
+                &id.to_string(),
+                json!({
+                    "keep_sessions": keep_sessions,
+                    "sessions_ended": ended.sessions,
+                    "tokens_revoked": ended.tokens,
+                }),
+            )
+            .await;
+            if keep_sessions {
+                eprintln!(
+                    "rotated app {id} ({name}); kept the sessions it minted (--keep-sessions)"
+                );
+            } else {
+                eprintln!(
+                    "rotated app {id} ({name}); ended {} session(s) it minted and revoked {} access token(s) created with them",
+                    ended.sessions, ended.tokens
+                );
+            }
+            eprintln!("the new key is shown once:");
             println!("{key}");
         }
     }
