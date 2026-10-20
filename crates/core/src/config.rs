@@ -118,12 +118,37 @@ pub struct OidcProvider {
 impl OidcProvider {
     /// [`Self::name`], else the id.
     pub fn label(&self) -> &str {
-        self.name
-            .as_deref()
-            .map(str::trim)
-            .filter(|n| !n.is_empty())
-            .unwrap_or(&self.id)
+        label(self.name.as_deref(), &self.id)
     }
+}
+
+/// One `[[delegated_sign_in]]` provider: another site signs people in and mints their session
+/// through `POST /v1/apps/self/users/{subject}/sessions` (it holds a linked-app key with
+/// `trust_email`). Listed next to the `[[oidc]]` providers; `GET /v1/auth/oidc/{id}/start`
+/// sends the browser to [`Self::start_url`] with the client's `redirect_uri`.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct DelegatedSignIn {
+    /// Path segment in `/v1/auth/oidc/{id}/start` (`[a-z0-9_-]`, ≤ 32, unique across
+    /// `[[oidc]]` and `[[delegated_sign_in]]`).
+    pub id: String,
+    /// Human label for sign-in buttons (defaults to `id`).
+    pub name: Option<String>,
+    /// The delegate's sign-in page: absolute `https` URL (`http` only for a loopback host),
+    /// no fragment, no credentials. `redirect_uri=<client's>` is appended to its query.
+    pub start_url: String,
+}
+
+impl DelegatedSignIn {
+    /// [`Self::name`], else the id.
+    pub fn label(&self) -> &str {
+        label(self.name.as_deref(), &self.id)
+    }
+}
+
+fn label<'a>(name: Option<&'a str>, id: &'a str) -> &'a str {
+    name.map(str::trim).filter(|n| !n.is_empty()).unwrap_or(id)
 }
 
 #[derive(Clone, Debug)]
@@ -135,6 +160,9 @@ pub struct Limits {
     pub import_max_bytes: usize,
     /// Longest single NDJSON line in an import.
     pub import_max_line_bytes: usize,
+    /// Sessions one linked app may mint per minute
+    /// (`POST /v1/apps/self/users/{subject}/sessions`).
+    pub app_sessions_per_minute: u32,
 }
 
 impl Default for Limits {
@@ -143,6 +171,7 @@ impl Default for Limits {
             auth_per_minute: 10,
             import_max_bytes: 512 << 20,
             import_max_line_bytes: 32 << 20,
+            app_sessions_per_minute: 60,
         }
     }
 }
@@ -171,6 +200,8 @@ pub struct Config {
     pub web_root: Option<PathBuf>,
     pub ops: OpsConfig,
     pub oidc: Vec<OidcProvider>,
+    /// `[[delegated_sign_in]]` providers, listed after [`Self::oidc`].
+    pub delegated_sign_in: Vec<DelegatedSignIn>,
     pub limits: Limits,
     /// Prometheus `/metrics` listener; `None` disables it.
     pub metrics_listen: Option<SocketAddr>,
@@ -197,6 +228,7 @@ impl fmt::Debug for Config {
                 "oidc",
                 &self.oidc.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
             )
+            .field("delegated_sign_in", &self.delegated_sign_in)
             .field("limits", &self.limits)
             .field("metrics_listen", &self.metrics_listen)
             .field("log_format", &self.log_format)
@@ -250,6 +282,8 @@ struct RawConfig {
     #[serde(default)]
     oidc: Vec<OidcProvider>,
     #[serde(default)]
+    delegated_sign_in: Vec<DelegatedSignIn>,
+    #[serde(default)]
     limits: RawLimits,
 }
 
@@ -283,6 +317,7 @@ struct RawLimits {
     auth_per_minute: Option<u32>,
     import_max_bytes: Option<usize>,
     import_max_line_bytes: Option<usize>,
+    app_sessions_per_minute: Option<u32>,
 }
 
 #[derive(Clone, Copy)]
@@ -319,6 +354,7 @@ const ENV_KEYS: &[(&str, Kind)] = &[
     ("limits.auth_per_minute", Kind::Int),
     ("limits.import_max_bytes", Kind::Int),
     ("limits.import_max_line_bytes", Kind::Int),
+    ("limits.app_sessions_per_minute", Kind::Int),
 ];
 
 /// Environment variable name for a dotted config key: `tls.mode` → `CANVAS_CLOUD_TLS__MODE`.
@@ -513,9 +549,16 @@ impl Config {
                 .limits
                 .import_max_line_bytes
                 .unwrap_or(defaults.import_max_line_bytes),
+            app_sessions_per_minute: raw
+                .limits
+                .app_sessions_per_minute
+                .unwrap_or(defaults.app_sessions_per_minute),
         };
         if limits.auth_per_minute == 0 {
             bail!("`limits.auth_per_minute` must be at least 1");
+        }
+        if limits.app_sessions_per_minute == 0 {
+            bail!("`limits.app_sessions_per_minute` must be at least 1");
         }
         if limits.import_max_bytes < 1024 || limits.import_max_bytes > 16 << 30 {
             bail!("`limits.import_max_bytes` must be between 1 KiB and 16 GiB");
@@ -571,6 +614,19 @@ impl Config {
                 bail!("duplicate `[[oidc]]` id {:?}", p.id);
             }
         }
+        let mut delegated_sign_in = raw.delegated_sign_in;
+        for d in &mut delegated_sign_in {
+            d.start_url = validate_delegated(d)?;
+            if raw.oidc.iter().any(|p| p.id == d.id) {
+                bail!(
+                    "`[[delegated_sign_in]] id` {:?} is also an `[[oidc]]` id",
+                    d.id
+                );
+            }
+            if !seen.insert(d.id.clone()) {
+                bail!("duplicate `[[delegated_sign_in]]` id {:?}", d.id);
+            }
+        }
 
         Ok(Self {
             listen,
@@ -585,6 +641,7 @@ impl Config {
             web_root,
             ops,
             oidc: raw.oidc,
+            delegated_sign_in,
             limits,
             metrics_listen,
             log_format: raw.log_format.unwrap_or_default(),
@@ -619,6 +676,7 @@ impl Config {
             web_root: None,
             ops: OpsConfig::default(),
             oidc: Vec::new(),
+            delegated_sign_in: Vec::new(),
             limits: Limits::default(),
             metrics_listen: None,
             log_format: LogFormat::Pretty,
@@ -765,13 +823,60 @@ fn validate_web_app_url(input: &str) -> anyhow::Result<String> {
     Ok(out)
 }
 
-fn validate_oidc(p: &OidcProvider) -> anyhow::Result<()> {
-    let id_ok = !p.id.is_empty()
-        && p.id.len() <= 32
-        && p.id
+/// A sign-in provider id: `[a-z0-9_-]`, 1–32 characters.
+fn valid_provider_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 32
+        && id
             .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_');
-    if !id_ok {
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+}
+
+/// Checks `d`; returns its normalised `start_url`.
+fn validate_delegated(d: &DelegatedSignIn) -> anyhow::Result<String> {
+    if !valid_provider_id(&d.id) {
+        bail!(
+            "`[[delegated_sign_in]] id` {:?} must be [a-z0-9_-], 1-32 characters",
+            d.id
+        );
+    }
+    let u = url::Url::parse(d.start_url.trim()).with_context(|| {
+        format!(
+            "`[[delegated_sign_in]]` {}: start_url must be an absolute URL",
+            d.id
+        )
+    })?;
+    let loopback = match u.host() {
+        Some(url::Host::Domain(h)) => h.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    };
+    match u.scheme() {
+        "https" if u.host().is_some() => {}
+        "http" if loopback => {}
+        _ => bail!(
+            "`[[delegated_sign_in]]` {}: start_url must be https (http only for localhost / 127.0.0.1 / [::1])",
+            d.id
+        ),
+    }
+    if u.fragment().is_some() || !u.username().is_empty() || u.password().is_some() {
+        bail!(
+            "`[[delegated_sign_in]]` {}: start_url must not contain a fragment or credentials",
+            d.id
+        );
+    }
+    if u.query_pairs().any(|(k, _)| k == "redirect_uri") {
+        bail!(
+            "`[[delegated_sign_in]]` {}: start_url must not carry redirect_uri (the server adds it)",
+            d.id
+        );
+    }
+    Ok(u.into())
+}
+
+fn validate_oidc(p: &OidcProvider) -> anyhow::Result<()> {
+    if !valid_provider_id(&p.id) {
         bail!(
             "`[[oidc]] id` {:?} must be [a-z0-9_-], 1-32 characters",
             p.id
@@ -1103,6 +1208,98 @@ mod tests {
         // Unknown keys are refused (typos would silently weaken a sign-in policy).
         let typo = format!("{text}allowed_domain = [\"x.com\"]\n");
         assert!(Config::from_toml_str(&typo, &env(&[])).is_err());
+    }
+
+    fn delegated(id: &str, start_url: &str) -> String {
+        format!("[[delegated_sign_in]]\nid = {id:?}\nstart_url = {start_url:?}\n")
+    }
+
+    fn load_err(text: &str) -> String {
+        format!("{:#}", Config::from_toml_str(text, &env(&[])).unwrap_err())
+    }
+
+    #[test]
+    fn delegated_sign_in_parses_and_validates() {
+        let oidc = "[[oidc]]\nid = \"google\"\nissuer = \"https://accounts.google.com\"\nclient_id = \"x\"\n";
+        let text = format!(
+            "{BASE}\n{oidc}{}name = \"Exowatt SSO\"\n{}",
+            delegated("exowatt", "https://sso.example.com/canvas-signin?x=1"),
+            delegated("dev", "http://127.0.0.1:18000"),
+        );
+        let c = Config::from_toml_str(&text, &env(&[])).unwrap();
+        assert_eq!(c.oidc.len(), 1);
+        assert_eq!(c.delegated_sign_in.len(), 2);
+        let d = &c.delegated_sign_in[0];
+        assert_eq!((d.id.as_str(), d.label()), ("exowatt", "Exowatt SSO"));
+        assert_eq!(d.start_url, "https://sso.example.com/canvas-signin?x=1");
+        let d = &c.delegated_sign_in[1];
+        assert_eq!(d.label(), "dev", "the label defaults to the id");
+        assert_eq!(d.start_url, "http://127.0.0.1:18000/", "normalised");
+        for ok in ["http://localhost:5173/signin", "http://[::1]:8080/s"] {
+            let t = format!("{BASE}\n{}", delegated("x", ok));
+            assert!(Config::from_toml_str(&t, &env(&[])).is_ok(), "{ok}");
+        }
+
+        let cases = [
+            (delegated("Exo Watt", "https://a.example"), "[a-z0-9_-]"),
+            (delegated(&"x".repeat(33), "https://a.example"), "1-32"),
+            (delegated("", "https://a.example"), "1-32"),
+            (delegated("x", "/canvas-signin"), "absolute URL"),
+            (delegated("x", "http://sso.example.com/s"), "must be https"),
+            (delegated("x", "http://10.0.0.1/s"), "must be https"),
+            (delegated("x", "javascript:alert(1)"), "must be https"),
+            (delegated("x", "https://a.example/s#f"), "fragment"),
+            (delegated("x", "https://u:p@a.example/s"), "credentials"),
+            (
+                delegated("x", "https://a.example/s?redirect_uri=y"),
+                "redirect_uri",
+            ),
+            (
+                format!(
+                    "{}{}",
+                    delegated("x", "https://a.example"),
+                    delegated("x", "https://b.example")
+                ),
+                "duplicate",
+            ),
+            (
+                format!("{oidc}{}", delegated("google", "https://a.example")),
+                "also an `[[oidc]]` id",
+            ),
+            (
+                format!(
+                    "{}{}",
+                    delegated("x", "https://a.example"),
+                    "issuer = \"y\"\n"
+                ),
+                "unknown field",
+            ),
+            (
+                "[[delegated_sign_in]]\nid = \"x\"\n".to_owned(),
+                "start_url",
+            ),
+        ];
+        for (extra, want) in cases {
+            let err = load_err(&format!("{BASE}\n{extra}"));
+            assert!(err.contains(want), "{extra:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn app_sessions_limit() {
+        let c = Config::from_toml_str(BASE, &env(&[])).unwrap();
+        assert_eq!(c.limits.app_sessions_per_minute, 60);
+        let c = Config::from_toml_str(
+            BASE,
+            &env(&[("CANVAS_CLOUD_LIMITS__APP_SESSIONS_PER_MINUTE", "5")]),
+        )
+        .unwrap();
+        assert_eq!(c.limits.app_sessions_per_minute, 5);
+        let zero = Config::from_toml_str(
+            BASE,
+            &env(&[("CANVAS_CLOUD_LIMITS__APP_SESSIONS_PER_MINUTE", "0")]),
+        );
+        assert!(zero.is_err());
     }
 
     #[test]

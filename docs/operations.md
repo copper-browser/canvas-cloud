@@ -135,6 +135,8 @@ appears after its first event, so a fresh process shows only a few.
 | `canvas_mentions_rate_limited_total` | counter | | mention posts refused by the per-user limit |
 | `auth_rate_limited_total` | counter | | `/v1/auth/*` requests refused by the per-IP limit |
 | `auth_email_rate_limited_total` | counter | | signup/login/password calls refused by the per-email limit |
+| `app_sessions_created_total` | counter | | sessions linked apps minted for their users (`POST /v1/apps/self/users/{subject}/sessions`) |
+| `app_sessions_rate_limited_total` | counter | | such mints refused by the per-app limit |
 | `mcp_tool_calls_total` | counter | `tool`, `outcome` (`ok`/`error`) | MCP tool calls |
 | `db_pool_size` / `db_pool_idle` | gauge | | PostgreSQL pool connections (refreshed on scrape) |
 | `process_uptime_seconds` | gauge | | uptime (refreshed on scrape) |

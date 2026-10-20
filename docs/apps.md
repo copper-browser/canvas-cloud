@@ -25,7 +25,8 @@ characters (`0x20`–`0x7e`), with no leading or trailing whitespace. Put it in 
 percent-encoded.
 
 Errors use the server's usual JSON shape, `{"error": "<code>", "message": "…"}`, plus extra
-fields where noted. `GET /v1/info` lists `app_events` and `app_import` in `features`.
+fields where noted. `GET /v1/info` lists `app_events`, `app_import` and `app_sessions` in
+`features`.
 
 ## Example
 
@@ -134,6 +135,39 @@ this app does not have returns `404`.
 Closes the user's live canvas sockets; their clients reconnect. The response is
 `{"ok": true, "subject", "user_id"}`.
 
+### `POST /v1/apps/self/users/{subject}/sessions` — sign a user in
+
+Starts an ordinary session for one of this app's users and returns its token: the same
+`cvs_…` session that password or OIDC sign-in gives (same table, valid until 30 days after
+its last use), owned by the person, not the app. This is how a site that signs people in
+itself acts as a [delegated sign-in](auth.md#delegated-sign-in) provider. The body is
+optional (`{}`).
+
+```sh
+curl -fsS -X POST "$BASE/apps/self/users/ann/sessions" -H "$AUTH"
+```
+
+Response `201`, with `Cache-Control: no-store`:
+
+```json
+{"token": "cvs_…", "user_id": "…", "expires_at": "2026-11-19T18:10:00Z"}
+```
+
+| Error | When |
+|---|---|
+| `400` | the request has `X-Canvas-User` (the app calls as itself), or the body is not JSON |
+| `401` | not an app key (a user's session, a token, a revoked key) |
+| `403 trust_email_required` | the app does not have `trust_email` (`canvas-cloud apps set <id> --trust-email true`); only an app that vouches for its people's identity may sign them in |
+| `404 unknown_subject` | this app has not provisioned that subject (`PUT` it first) |
+| `403 account_disabled` | the user is disabled |
+| `429 rate_limited` | more than `limits.app_sessions_per_minute` (default 60) sessions from this app in a minute |
+
+Hand the token to the person's browser (for delegated sign-in: redirect to
+`<redirect_uri>#token=cvs_…`) and do not keep, log or reuse it; mint one per sign-in. The
+person can sign out with it (`POST /v1/auth/logout`) like any session. The server logs and
+audits the call (`app.user.session`) without the token. A user who has a session is no
+longer a *pure app user*, so `DELETE` then only unlinks them.
+
 ## Events — `GET /v1/apps/self/events`
 
 Server-Sent Events covering every canvas event for this app's users:
@@ -224,6 +258,7 @@ returns `403 import_not_allowed`.
 Every mutating call writes `admin_audit` with the actor `app:<app id>`. The actions are:
 
 * `app.user.create`
+* `app.user.session` (a session minted; the detail is the subject, never the token)
 * `app.user.unlink`
 * `app.user.delete`
 * `app.canvas.delete`

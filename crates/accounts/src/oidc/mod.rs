@@ -9,6 +9,11 @@
 //! * `GET /v1/auth/oidc/{id}/callback` — verifies the round trip, exchanges the code, verifies
 //!   the `id_token`, finds (or, when allowed, creates) the user by verified email, starts a
 //!   session and redirects to `redirect_uri#token=cvs_…` (errors: `#error=…&error_description=…`).
+//!
+//! A `[[delegated_sign_in]]` provider is listed with them and shares the `start` route: it
+//! only checks `redirect_uri` (same origin as `public_url`) and redirects to the delegate's
+//! `start_url`, which answers the same way through a linked app's
+//! `POST /v1/apps/self/users/{subject}/sessions`.
 
 mod client;
 
@@ -17,7 +22,7 @@ use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE, COOKIE, LOCATION, SET_COOK
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
-use canvas_cloud_core::config::{Config, OidcProvider};
+use canvas_cloud_core::config::{Config, DelegatedSignIn, OidcProvider};
 use canvas_cloud_core::error::ApiError;
 use canvas_cloud_core::extract::QueryParams;
 use canvas_cloud_core::identity::{self, NewUser, SignupPolicy, MAX_DISPLAY_NAME_CHARS};
@@ -64,6 +69,12 @@ pub(crate) fn callback_url(cfg: &Config, id: &str) -> String {
 /// `redirect_uris`, or is an `http(s)` URL with the same origin as `public_url` (a web app
 /// served by this server). Never with a fragment (the result goes there) or credentials.
 pub(crate) fn redirect_allowed(public_url: &str, p: &OidcProvider, uri: &str) -> bool {
+    redirect_allowed_with(public_url, &p.redirect_uris, uri)
+}
+
+/// [`redirect_allowed`] with an explicit list of extra exact-match URIs (none for a
+/// delegated provider: only this server's origin).
+fn redirect_allowed_with(public_url: &str, extra: &[String], uri: &str) -> bool {
     if uri.is_empty() || uri.len() > MAX_REDIRECT_URI_BYTES {
         return false;
     }
@@ -73,7 +84,7 @@ pub(crate) fn redirect_allowed(public_url: &str, p: &OidcProvider, uri: &str) ->
     if u.fragment().is_some() || !u.username().is_empty() || u.password().is_some() {
         return false;
     }
-    if p.redirect_uris.iter().any(|r| r == uri) {
+    if extra.iter().any(|r| r == uri) {
         return true;
     }
     let Ok(public) = Url::parse(public_url) else {
@@ -82,21 +93,10 @@ pub(crate) fn redirect_allowed(public_url: &str, p: &OidcProvider, uri: &str) ->
     matches!(u.scheme(), "http" | "https") && u.origin() == public.origin()
 }
 
-/// `GET /v1/auth/oidc` → `{providers: [{id, name, start}]}`.
+/// `GET /v1/auth/oidc` → `{providers: [{id, name, start, kind[, start_url]}]}`: the
+/// `[[oidc]]` providers, then the `[[delegated_sign_in]]` ones.
 pub(crate) async fn list(State(state): State<SharedState>) -> Json<Value> {
-    let providers: Vec<Value> = state
-        .cfg
-        .oidc
-        .iter()
-        .map(|p| {
-            json!({
-                "id": p.id,
-                "name": p.label(),
-                "start": format!("/v1/auth/oidc/{}/start", p.id),
-            })
-        })
-        .collect();
-    Json(json!({ "providers": providers }))
+    Json(json!({ "providers": canvas_cloud_core::app::sign_in_providers(&state.cfg) }))
 }
 
 #[derive(Deserialize)]
@@ -135,6 +135,9 @@ pub(crate) async fn start(
     Path(id): Path<String>,
     QueryParams(q): QueryParams<StartQuery>,
 ) -> Result<Response> {
+    if let Some(d) = state.cfg.delegated_sign_in.iter().find(|d| d.id == id) {
+        return delegated_start(&state.cfg, d, q.redirect_uri.as_deref().unwrap_or_default());
+    }
     let p = provider(&state.cfg, &id)?;
     let redirect_uri = q.redirect_uri.unwrap_or_default();
     if !redirect_allowed(&state.cfg.public_url, p, &redirect_uri) {
@@ -190,6 +193,35 @@ pub(crate) async fn start(
         auth.as_str(),
         cookie(&state.cfg, &state_token, STATE_TTL_SECS),
     ))
+}
+
+/// `GET /v1/auth/oidc/{id}/start?redirect_uri=…` for a `[[delegated_sign_in]]` provider:
+/// `302` to its `start_url` with `redirect_uri` added to the query. The delegate signs the
+/// person in, mints a session with `POST /v1/apps/self/users/{subject}/sessions` and sends
+/// the browser to `redirect_uri#token=cvs_…` (or `#error=…`). No state is kept here; the
+/// same `redirect_uri` rule as OIDC applies (this server's origin, no fragment), and the
+/// delegate must enforce it too.
+fn delegated_start(cfg: &Config, d: &DelegatedSignIn, redirect_uri: &str) -> Result<Response> {
+    if !redirect_allowed_with(&cfg.public_url, &[], redirect_uri) {
+        return Err(Error::coded(
+            StatusCode::BAD_REQUEST,
+            "redirect_uri_not_allowed",
+            "redirect_uri must be on this server's origin, without a fragment",
+        ));
+    }
+    let mut to = Url::parse(&d.start_url)
+        .map_err(|e| ApiError::internal(format!("delegated start_url: {e}")))?;
+    to.query_pairs_mut()
+        .append_pair("redirect_uri", redirect_uri);
+    tracing::info!(provider = %d.id, "delegated sign-in started");
+    let mut resp = StatusCode::FOUND.into_response();
+    let h = resp.headers_mut();
+    let location = HeaderValue::from_str(to.as_str())
+        .map_err(|e| ApiError::internal(format!("delegated start location: {e}")))?;
+    h.insert(LOCATION, location);
+    h.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    h.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
+    Ok(resp)
 }
 
 #[derive(Deserialize)]

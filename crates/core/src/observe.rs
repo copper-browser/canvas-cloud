@@ -99,6 +99,14 @@ pub fn install_metrics() -> anyhow::Result<PrometheusHandle> {
         "auth_rate_limited_total",
         "Requests rejected by the auth rate limiter"
     );
+    metrics::describe_counter!(
+        "app_sessions_created_total",
+        "Sessions linked apps minted for their users"
+    );
+    metrics::describe_counter!(
+        "app_sessions_rate_limited_total",
+        "Session mints refused by the per-app rate limit"
+    );
     metrics::describe_gauge!("process_uptime_seconds", metrics::Unit::Seconds, "Uptime");
     Ok(handle)
 }

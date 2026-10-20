@@ -563,6 +563,7 @@ async fn info_is_public_and_signup_follows_settings() {
         .contains(&json!("app_users")));
     assert_eq!(v["limits"]["auth_per_minute"], 10);
     assert_eq!(v["limits"]["import_max_bytes"], 512 << 20);
+    assert_eq!(v["limits"]["app_sessions_per_minute"], 60);
     identity::set_setting(&st.db, "allow_signup", &json!(true))
         .await
         .unwrap();
@@ -574,7 +575,7 @@ async fn info_is_public_and_signup_follows_settings() {
 
     // OIDC providers and the served web app are advertised.
     let toml = format!(
-        "database_url = \"{}\"\nmaster_key = \"{}\"\nlisten = \"127.0.0.1:8480\"\nweb_root = \"/srv/app\"\n[tls]\nmode = \"off\"\n[[oidc]]\nid = \"google\"\nname = \"Google\"\nissuer = \"https://accounts.google.com\"\nclient_id = \"c\"\n[[oidc]]\nid = \"corp\"\nissuer = \"https://sso.example.test\"\nclient_id = \"c\"\n",
+        "database_url = \"{}\"\nmaster_key = \"{}\"\nlisten = \"127.0.0.1:8480\"\nweb_root = \"/srv/app\"\n[tls]\nmode = \"off\"\n[[oidc]]\nid = \"google\"\nname = \"Google\"\nissuer = \"https://accounts.google.com\"\nclient_id = \"c\"\n[[oidc]]\nid = \"corp\"\nissuer = \"https://sso.example.test\"\nclient_id = \"c\"\n[[delegated_sign_in]]\nid = \"portal\"\nname = \"Team portal\"\nstart_url = \"https://portal.example.test/canvas-signin\"\n",
         database_url(),
         ids::b64url(&[7u8; 32])
     );
@@ -587,8 +588,15 @@ async fn info_is_public_and_signup_follows_settings() {
     assert_eq!(
         v["auth"]["oidc"],
         json!([
-            { "id": "google", "name": "Google", "start": "/v1/auth/oidc/google/start" },
-            { "id": "corp", "name": "corp", "start": "/v1/auth/oidc/corp/start" },
+            { "id": "google", "name": "Google", "start": "/v1/auth/oidc/google/start", "kind": "oidc" },
+            { "id": "corp", "name": "corp", "start": "/v1/auth/oidc/corp/start", "kind": "oidc" },
+            {
+                "id": "portal",
+                "name": "Team portal",
+                "start": "/v1/auth/oidc/portal/start",
+                "kind": "delegated",
+                "start_url": "https://portal.example.test/canvas-signin",
+            },
         ])
     );
     assert_eq!(

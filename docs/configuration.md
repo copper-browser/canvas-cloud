@@ -16,8 +16,8 @@ validation in `Config::from_raw`).
    - Lists are comma-separated: `CANVAS_CLOUD_CORS__ALLOWED_ORIGINS=https://a.example.com,http://localhost:5173`.
    - Booleans: `true`/`1`/`yes`/`on` or `false`/`0`/`no`/`off`.
    - Integers may contain `_` (`536_870_912`).
-   - Other `CANVAS_CLOUD_*` variables are ignored. `[[oidc]]` cannot be set from the
-     environment.
+   - Other `CANVAS_CLOUD_*` variables are ignored. `[[oidc]]` and `[[delegated_sign_in]]`
+     cannot be set from the environment.
 3. `RUST_LOG`, when set, replaces `log_level`.
 
 Unknown keys in the file are an error (`unknown field`), so a typo fails at start instead of
@@ -102,8 +102,9 @@ Matching is exact. These origins may also call `POST /mcp`
 | `auth_per_minute` | integer ≥ 1 | `10` | `CANVAS_CLOUD_LIMITS__AUTH_PER_MINUTE` | requests per minute per client IP (IPv6: per /64) on `/v1/auth/*` except `GET /v1/auth/me`; signup, login and password changes are also limited per email with the same budget |
 | `import_max_bytes` | integer, 1 KiB – 16 GiB | `536870912` (512 MiB) | `CANVAS_CLOUD_LIMITS__IMPORT_MAX_BYTES` | largest `POST /v1/apps/self/import` body |
 | `import_max_line_bytes` | integer, 1 KiB – `import_max_bytes` | `33554432` (32 MiB) | `CANVAS_CLOUD_LIMITS__IMPORT_MAX_LINE_BYTES` | longest NDJSON line in an import |
+| `app_sessions_per_minute` | integer ≥ 1 | `60` | `CANVAS_CLOUD_LIMITS__APP_SESSIONS_PER_MINUTE` | sessions one linked app may mint per minute with `POST /v1/apps/self/users/{subject}/sessions` ([apps.md](apps.md#post-v1appsselfuserssubjectsessions--sign-a-user-in)) |
 
-All three are reported in `GET /v1/info` → `limits`. The other limits (body sizes, WebSocket
+All four are reported in `GET /v1/info` → `limits`. The other limits (body sizes, WebSocket
 frames, ops per call, mentions) are fixed in code; see
 [canvas.md](canvas.md#limits).
 
@@ -121,6 +122,30 @@ an error. Setup and the sign-in rules: [auth.md](auth.md#oidc-sign-in).
 | `client_secret_file` | path | unset | file whose content is the client secret (read at sign-in time; never inline in the config). Omit for a public client (PKCE only). Under systemd it must be readable by the `canvas-cloud` user |
 | `allowed_domains` | list | `[]` | only verified emails in these domains may sign in (empty = any) |
 | `redirect_uris` | list of URLs | `[]` | extra places the result may be sent, exact match (same-origin URLs of `public_url` are always allowed) |
+
+## `[[delegated_sign_in]]` — sign in through another site
+
+One table per site that signs people in for this server (a portal behind its own single
+sign-on, say); any number. File only. Unknown keys are an error. The site needs a linked-app
+key with `trust_email`; the protocol and what the site must check are in
+[auth.md](auth.md#delegated-sign-in).
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `id` | string | **required** | path segment in `/v1/auth/oidc/{id}/start`: `[a-z0-9_-]`, 1–32 characters, unique, and not also an `[[oidc]]` id |
+| `name` | string | the `id` | button label (`/v1/info`, `/account`) |
+| `start_url` | URL | **required** | the site's sign-in page; the server redirects there with `redirect_uri=…` added to the query. Absolute `https` (`http` only for `localhost`, `127.0.0.1` or `[::1]`), no fragment, no user name or password, no `redirect_uri` of its own |
+
+The providers are listed after the `[[oidc]]` ones in `GET /v1/info` → `auth.oidc` and
+`GET /v1/auth/oidc` as `{id, name, start, kind: "delegated", start_url}`. `doctor` prints
+each one.
+
+```toml
+[[delegated_sign_in]]
+id = "portal"
+name = "Team portal"
+start_url = "https://portal.example.com/canvas-signin"
+```
 
 ## Settings stored in the database
 
@@ -180,6 +205,7 @@ extra_url_schemes = []
 
 [limits]
 auth_per_minute = 10
+app_sessions_per_minute = 60
 
 [[oidc]]
 id = "google"

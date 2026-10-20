@@ -157,13 +157,16 @@ SHA-256 is stored, and lookup is by digest. Full reference: [auth.md](auth.md).
 
 | Credential | Header | Who | Notes |
 |---|---|---|---|
-| session `cvs_…` | `Authorization: Bearer` (`?token=` on WS/SSE) | a person, after signup, login or OIDC | expires 30 days after last use (refreshed at most once a minute); only sessions manage tokens and passwords |
+| session `cvs_…` | `Authorization: Bearer` (`?token=` on WS/SSE) | a person, after signup, login, OIDC or delegated sign-in | expires 30 days after last use (refreshed at most once a minute); only sessions manage tokens and passwords |
 | personal access token `cvt_…` | same | an agent or script acting as a person | scope `read` (GET/HEAD only, no rooms) or `write`; optional expiry; at most 50 per user |
 | app key `cva_…` + `X-Canvas-User: <subject>` | both headers | a linked app acting as one of its users | the subject must be provisioned for that app (`PUT /v1/apps/self/users/{subject}`), else `401 unknown_user`; the app then provisions and retries |
 | app key `cva_…` alone | `Authorization: Bearer` | the app itself | only `/v1/apps/self/*`; anywhere else it is `401` |
 
 - **OIDC** (authorization code + PKCE) is a way to get a session: the callback finds or
   creates the user by verified email and redirects with `#token=cvs_…`.
+- **Delegated sign-in** is another: `[[delegated_sign_in]]` sends the browser to a site that
+  signs the person in, mints their session as a `trust_email` linked app
+  (`POST /v1/apps/self/users/{subject}/sessions`) and redirects with `#token=cvs_…`.
 - **Admins** are not a role in the API: administration is the `canvas-cloud` CLI on the host,
   which talks to the database directly and writes `admin_audit` rows.
 - Every request resolves to one `AuthUser {user_id, email, display_name, via}`; `via` says
