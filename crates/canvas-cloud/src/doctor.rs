@@ -115,7 +115,7 @@ fn check_sign_in(r: &mut Report, cfg: &Config) {
             Level::Ok,
             "sign-in",
             format!(
-                "delegated {} \"{}\" → {} (the delegate mints sessions with a trust_email app key)",
+                "delegated {} \"{}\" → {} (the delegate mints sessions with an app key that has allow_sessions and trust_email)",
                 d.id,
                 d.label(),
                 d.start_url
@@ -209,7 +209,51 @@ async fn check_database(r: &mut Report, cfg: &Config) {
             ),
         );
     }
+    check_app_sessions(r, cfg, &pool).await;
     pool.close().await;
+}
+
+/// Which linked apps may sign their users in (mint `cvs_` sessions): an app key with that
+/// power can act as anyone it can link by email, so an operator should see the list.
+async fn check_app_sessions(r: &mut Report, cfg: &Config, pool: &sqlx::PgPool) {
+    let Ok(apps) = canvas_cloud_core::identity::list_apps(pool).await else {
+        return;
+    };
+    let mut minting = 0_usize;
+    for a in apps.iter().filter(|a| a.revoked_at.is_none()) {
+        if a.can_mint_sessions() {
+            minting += 1;
+            r.line(
+                Level::Ok,
+                "app-sessions",
+                format!(
+                    "app \"{}\" ({}) may sign its users in; {} live session(s) minted",
+                    a.name, a.id, a.live_sessions
+                ),
+            );
+        } else if a.allow_sessions {
+            r.line(
+                Level::Warn,
+                "app-sessions",
+                format!(
+                    "app \"{}\" ({}) has allow_sessions but not trust_email: it cannot sign users in",
+                    a.name, a.id
+                ),
+            );
+        }
+    }
+    if minting == 0 {
+        if cfg.delegated_sign_in.is_empty() {
+            r.line(Level::Ok, "app-sessions", "no linked app may sign users in");
+        } else {
+            r.line(
+                Level::Warn,
+                "app-sessions",
+                "[[delegated_sign_in]] is configured but no linked app may sign users in \
+                 (canvas-cloud apps set <app> --allow-sessions true)",
+            );
+        }
+    }
 }
 
 fn check_tls(r: &mut Report, cfg: &Config) {

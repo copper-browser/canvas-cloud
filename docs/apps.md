@@ -4,12 +4,56 @@ A **linked app** is another service that brings its own users to canvas-cloud �
 a Copper Cloud can link to Canvas Cloud. An operator registers it once:
 
 ```sh
-canvas-cloud apps create --name "Team portal" [--allow-import] [--no-trust-email]   # prints cva_… once
-canvas-cloud apps list                        # status, policy, users and canvases per app (never keys)
-canvas-cloud apps set <id> --allow-import true|false [--trust-email true|false]
-canvas-cloud apps rotate <id>                 # new key, printed once; the old one stops working
-canvas-cloud apps revoke <id>                 # key stops working; users and canvases stay
+canvas-cloud apps create --name "Team portal" [--allow-import] [--no-trust-email] [--allow-sessions]
+                                              # prints cva_… once
+canvas-cloud apps list                        # status, policy, users, canvases, minted sessions (never keys)
+canvas-cloud apps show <app>                  # one app's policy and what it minted
+canvas-cloud apps set <app> [--allow-import true|false] [--trust-email true|false] [--allow-sessions true|false]
+canvas-cloud apps rotate <app> [--keep-sessions]  # new key, printed once; the old one stops working
+canvas-cloud apps revoke <app>                # key stops working; what it minted ends; users and canvases stay
 ```
+
+`<app>` is the app's id or its name (case-insensitive; when several apps share a name, the
+one live app among them, otherwise give the id). `apps update` is another name for
+`apps set`.
+
+An app's policy has three switches:
+
+| Flag | Default | What it allows |
+|---|---|---|
+| `allow_import` | off | `POST /v1/apps/self/import` ([below](#post-v1appsselfimportmodecreatereplace)) |
+| `trust_email` | on | provisioning a subject whose email belongs to an existing account links that account to the app ([upsert](#put-v1appsselfuserssubject--upsert)) |
+| `allow_sessions` | **off** | signing its users in with full sessions ([`POST …/sessions`](#post-v1appsselfuserssubjectsessions--sign-a-user-in)); needs `trust_email` too |
+
+`allow_sessions` is a separate opt-in because together with `trust_email` it lets the app key
+sign in as **anyone it can link by email** — any account on the server whose address the app
+provisions. Turn it on only for an app that really signs people in (a
+[delegated sign-in](auth.md#delegated-sign-in) provider), and keep its key as safe as the
+server's own secrets:
+
+```sh
+canvas-cloud apps set "Team portal" --allow-sessions true
+```
+
+### Revoking and rotating
+
+The sessions an app mints, and the access tokens a person creates while signed in with one,
+are tagged with the app. Ending an app's key ends them too:
+
+* `apps revoke <app>` disables the key, deletes every session the app minted and revokes the
+  access tokens created with them. Running it again on a revoked app ends anything still
+  tagged with it.
+* `apps rotate <app>` replaces the key (the old one stops working at once) and also ends what
+  the app minted, because a leaked key may have been used to mint sessions. For routine
+  rotation, when the key is not suspected, `apps rotate <app> --keep-sessions` keeps them
+  signed in.
+* `apps set <app> --allow-sessions false` stops new sign-ins at once; sessions already
+  minted stay until they expire or the app is rotated or revoked.
+
+Both print and audit (`app.revoke`, `app.rotate`, actor `cli`) how many sessions they ended
+and tokens they revoked. A person's own sessions and tokens (password, OIDC, or tokens made
+with those) are never touched, and the app's users and their canvases stay. Open canvas
+sockets and event streams that used an ended credential close when they next check it.
 
 The app then calls canvas-cloud in one of two ways:
 
@@ -137,11 +181,20 @@ Closes the user's live canvas sockets; their clients reconnect. The response is
 
 ### `POST /v1/apps/self/users/{subject}/sessions` — sign a user in
 
-Starts an ordinary session for one of this app's users and returns its token: the same
-`cvs_…` session that password or OIDC sign-in gives (same table, valid until 30 days after
-its last use), owned by the person, not the app. This is how a site that signs people in
-itself acts as a [delegated sign-in](auth.md#delegated-sign-in) provider. The body is
-optional (`{}`).
+Starts a session for one of this app's users and returns its token: a `cvs_…` session like
+the one password or OIDC sign-in gives, owned by the person, not the app. This is how a site
+that signs people in itself acts as a [delegated sign-in](auth.md#delegated-sign-in)
+provider. The body is optional (`{}`).
+
+The app needs **both** `allow_sessions` and `trust_email`. `allow_sessions` is off for every
+app until an operator turns it on (`canvas-cloud apps set <app> --allow-sessions true`; apps
+created before 0.2.1 lost it on upgrade). The session:
+
+* ends 30 days after its last use like any session, and at the latest
+  `limits.app_session_ttl_hours` (default 720, i.e. 30 days) after it was minted, however
+  much it is used ([configuration.md](configuration.md#limits));
+* is tagged with the app: `apps revoke` and `apps rotate` (without `--keep-sessions`) delete
+  it and revoke the access tokens created with it ([Revoking and rotating](#revoking-and-rotating)).
 
 ```sh
 curl -fsS -X POST "$BASE/apps/self/users/ann/sessions" -H "$AUTH"
@@ -157,7 +210,8 @@ Response `201`, with `Cache-Control: no-store`:
 |---|---|
 | `400` | the request has `X-Canvas-User` (the app calls as itself), or the body is not JSON |
 | `401` | not an app key (a user's session, a token, a revoked key) |
-| `403 trust_email_required` | the app does not have `trust_email` (`canvas-cloud apps set <id> --trust-email true`); only an app that vouches for its people's identity may sign them in |
+| `403 sessions_not_allowed` | the app does not have `allow_sessions` (`canvas-cloud apps set <app> --allow-sessions true`) |
+| `403 trust_email_required` | the app has `allow_sessions` but not `trust_email` (`canvas-cloud apps set <app> --trust-email true`); only an app that vouches for its people's identity may sign them in |
 | `404 unknown_subject` | this app has not provisioned that subject (`PUT` it first) |
 | `403 account_disabled` | the user is disabled |
 | `429 rate_limited` | more than `limits.app_sessions_per_minute` (default 60) sessions from this app in a minute |
@@ -237,7 +291,7 @@ same rules as delete decide which canvases the app may ask about.
 ## `GET /v1/apps/self/stats`
 
 ```json
-{"app": {"id", "name", "allow_import", "trust_email"}, "allow_import": true,
+{"app": {"id", "name", "allow_import", "trust_email", "allow_sessions"}, "allow_import": true,
  "users": 2, "canvases": 3, "rooms": {"rooms": 1, "peers": 2}}
 ```
 
@@ -263,4 +317,5 @@ Every mutating call writes `admin_audit` with the actor `app:<app id>`. The acti
 * `app.user.delete`
 * `app.canvas.delete`
 * `app.canvas.import`
-* `app.set` (from the CLI)
+* `app.create`, `app.set`, `app.rotate`, `app.revoke` (from the CLI, actor `cli`; rotate and
+  revoke record `sessions_ended` and `tokens_revoked`, rotate also `keep_sessions`)

@@ -476,15 +476,29 @@ async fn app_keys_act_for_their_users_or_as_themselves() {
     let listed = identity::list_apps(&st.db).await.unwrap();
     let row = listed.iter().find(|a| a.id == app_id).unwrap();
     assert_eq!((row.users, row.trust_email), (1, false));
-    let new_key = identity::rotate_app_key(&st.db, app_id)
+    assert!(!row.allow_sessions && !row.can_mint_sessions());
+    assert_eq!((row.live_sessions, row.live_tokens), (0, 0));
+    let (new_key, ended) = identity::rotate_app_key(&st.db, app_id, true)
         .await
         .unwrap()
         .unwrap();
+    assert_eq!(ended, identity::AppCredentialsEnded::default());
     let (s, _) = Call::get("/apps/self", &key).send(&app).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
     let (s, _) = Call::get("/apps/self", &new_key).send(&app).await;
     assert_eq!(s, StatusCode::OK);
-    assert!(identity::revoke_app(&st.db, app_id).await.unwrap());
+    let (was_live, ended) = identity::revoke_app(&st.db, app_id).await.unwrap().unwrap();
+    assert!(was_live);
+    assert_eq!(ended, identity::AppCredentialsEnded::default());
+    // The person's own session (not minted by the app) is untouched.
+    let (s, _) = Call::get("/whoami", &session).send(&app).await;
+    assert_eq!(s, StatusCode::OK);
+    let (was_live, _) = identity::revoke_app(&st.db, app_id).await.unwrap().unwrap();
+    assert!(!was_live, "already revoked");
+    assert!(identity::revoke_app(&st.db, Uuid::now_v7())
+        .await
+        .unwrap()
+        .is_none());
     let (s, _) = Call::get("/apps/self", &new_key).send(&app).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
     let (s, _) = Call::get("/whoami", &new_key)
@@ -635,4 +649,254 @@ async fn migrations_are_complete_and_idempotent() {
     ] {
         assert!(tables.iter().any(|x| x == t), "{t} in {tables:?}");
     }
+}
+
+/// 0.2.1: what an app mints is tagged with it, and revoking or rotating the app ends it.
+#[tokio::test]
+async fn app_minted_sessions_and_tokens_end_with_the_app() {
+    let st = state().await;
+    let app = test_app(&st);
+    let (uid, _) = user(&st.db, "minted").await;
+    let flags = identity::AppFlags {
+        allow_import: false,
+        trust_email: true,
+        allow_sessions: true,
+    };
+    let (app_id, _key) = identity::create_app_with(&st.db, "Minter", flags)
+        .await
+        .unwrap();
+    let row = identity::get_app(&st.db, app_id).await.unwrap().unwrap();
+    assert!(row.allow_sessions && row.can_mint_sessions());
+
+    // A minted session, a token made with it, and the person's own session and token.
+    let mint = |hours: Option<u32>| identity::create_app_session(&st.db, uid, None, app_id, hours);
+    let (minted, _) = mint(None).await.unwrap();
+    let (_, tagged_token) =
+        identity::create_access_token_for(&st.db, uid, "tagged", Scope::Write, None, Some(app_id))
+            .await
+            .unwrap();
+    let own = create_session(&st.db, uid, None).await.unwrap();
+    let (_, own_token) = create_access_token(&st.db, uid, "own", Scope::Write, None)
+        .await
+        .unwrap();
+    let tag: Option<Uuid> =
+        sqlx::query_scalar("SELECT created_by_app FROM sessions WHERE token_sha256 = $1")
+            .bind(&credential_digest(&minted)[..])
+            .fetch_one(&st.db)
+            .await
+            .unwrap();
+    assert_eq!(tag, Some(app_id));
+    let row = identity::get_app(&st.db, app_id).await.unwrap().unwrap();
+    assert_eq!((row.live_sessions, row.live_tokens), (1, 1));
+    let alive = |t: String| {
+        let app = app.clone();
+        async move { Call::get("/whoami", &t).send(&app).await.0 == StatusCode::OK }
+    };
+
+    // Routine rotation keeps them.
+    let (_, ended) = identity::rotate_app_key(&st.db, app_id, false)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(ended, identity::AppCredentialsEnded::default());
+    assert!(alive(minted.clone()).await && alive(tagged_token.clone()).await);
+
+    // Rotation (default) ends them; the person's own credentials stay.
+    let (_, ended) = identity::rotate_app_key(&st.db, app_id, true)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        ended,
+        identity::AppCredentialsEnded {
+            sessions: 1,
+            tokens: 1
+        }
+    );
+    assert!(!alive(minted).await && !alive(tagged_token).await);
+    assert!(alive(own.clone()).await && alive(own_token.clone()).await);
+
+    // Revocation ends them too (and again on an already revoked app).
+    let (minted, _) = mint(None).await.unwrap();
+    let (_, tagged_token) =
+        identity::create_access_token_for(&st.db, uid, "tagged", Scope::Read, None, Some(app_id))
+            .await
+            .unwrap();
+    let (was_live, ended) = identity::revoke_app(&st.db, app_id).await.unwrap().unwrap();
+    assert!(was_live);
+    assert_eq!((ended.sessions, ended.tokens), (1, 1));
+    assert!(!alive(minted).await && !alive(tagged_token).await);
+    assert!(alive(own).await && alive(own_token).await);
+    let (late, _) = mint(None).await.unwrap();
+    let (was_live, ended) = identity::revoke_app(&st.db, app_id).await.unwrap().unwrap();
+    assert!(!was_live);
+    assert_eq!((ended.sessions, ended.tokens), (1, 0));
+    assert!(!alive(late).await);
+}
+
+/// `limits.app_session_ttl_hours`: an app-minted session never slides past its cap; an
+/// ordinary one keeps sliding.
+#[tokio::test]
+async fn app_sessions_have_a_hard_lifetime() {
+    let st = state().await;
+    let app = test_app(&st);
+    let (uid, _) = user(&st.db, "capped").await;
+    let (app_id, _) = identity::create_app_with(
+        &st.db,
+        "Capper",
+        identity::AppFlags {
+            trust_email: true,
+            allow_sessions: true,
+            ..identity::AppFlags::default()
+        },
+    )
+    .await
+    .unwrap();
+    let (capped, expires) = identity::create_app_session(&st.db, uid, None, app_id, Some(2))
+        .await
+        .unwrap();
+    let left = expires - time::OffsetDateTime::now_utc();
+    assert!(
+        (time::Duration::minutes(119)..=time::Duration::hours(2)).contains(&left),
+        "{left}"
+    );
+    let (uncapped, expires) = identity::create_app_session(&st.db, uid, None, app_id, None)
+        .await
+        .unwrap();
+    let left = expires - time::OffsetDateTime::now_utc();
+    assert!(left > time::Duration::days(29), "{left}");
+
+    // A use slides an ordinary session to 30 days, but never past the cap.
+    sqlx::query(
+        "UPDATE sessions SET last_used_at = now() - interval '2 minutes',
+                             expires_at = now() + interval '1 minute'
+         WHERE token_sha256 = ANY($1)",
+    )
+    .bind(vec![
+        credential_digest(&capped).to_vec(),
+        credential_digest(&uncapped).to_vec(),
+    ])
+    .execute(&st.db)
+    .await
+    .unwrap();
+    for t in [&capped, &uncapped] {
+        let (s, _) = Call::get("/whoami", t).send(&app).await;
+        assert_eq!(s, StatusCode::OK);
+    }
+    let left = |t: &str| {
+        let digest = credential_digest(t);
+        let db = st.db.clone();
+        async move {
+            sqlx::query_scalar::<_, f64>(
+                "SELECT extract(epoch FROM expires_at - now())::float8 FROM sessions
+                 WHERE token_sha256 = $1",
+            )
+            .bind(&digest[..])
+            .fetch_one(&db)
+            .await
+            .unwrap()
+        }
+    };
+    let capped_left = left(&capped).await;
+    assert!((7000.0..=7200.0).contains(&capped_left), "{capped_left}");
+    assert!(left(&uncapped).await > 29.0 * 86400.0);
+    // Past the cap it is gone.
+    sqlx::query(
+        "UPDATE sessions SET max_expires_at = now() - interval '1 second',
+                             expires_at = now() - interval '1 second'
+         WHERE token_sha256 = $1",
+    )
+    .bind(&credential_digest(&capped)[..])
+    .execute(&st.db)
+    .await
+    .unwrap();
+    let (s, _) = Call::get("/whoami", &capped).send(&app).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+}
+
+/// Migration 0007 on a 0.2.0 database: existing apps (even `trust_email` ones) lose session
+/// minting, and sessions they minted (found through the `app.user.session` audit rows) are
+/// tagged with them. Runs in a throwaway schema.
+#[tokio::test]
+async fn migration_0007_opts_existing_apps_out() {
+    use sqlx::ConnectOptions as _;
+    use std::str::FromStr as _;
+
+    let st = state().await;
+    let schema = format!("mig0007_{}", Uuid::now_v7().simple());
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&st.db)
+        .await
+        .unwrap();
+    let opts = sqlx::postgres::PgConnectOptions::from_str(&database_url())
+        .unwrap()
+        .options([("search_path", schema.as_str())]);
+    let mut conn = opts.connect().await.unwrap();
+    let migrations: Vec<_> = canvas_cloud_core::db::MIGRATOR
+        .iter()
+        .filter(|m| !m.migration_type.is_down_migration())
+        .collect();
+    assert!(migrations.iter().any(|m| m.version == 7));
+    for m in migrations.iter().filter(|m| m.version < 7) {
+        sqlx::raw_sql(&m.sql).execute(&mut conn).await.unwrap();
+    }
+
+    // 0.2.0 state: a trust_email app (the old default) that minted a session for ann, ann's
+    // own password session a minute earlier, and another app that minted nothing.
+    let (old_app, quiet_app, ann) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+    sqlx::raw_sql(&format!(
+        "INSERT INTO users (id, email) VALUES ('{ann}', 'ann@example.test');
+         INSERT INTO apps (id, name, key_sha256) VALUES
+             ('{old_app}', 'Old', sha256('a')), ('{quiet_app}', 'Quiet', sha256('b'));
+         INSERT INTO sessions (id, user_id, token_sha256, expires_at, created_at) VALUES
+             (gen_random_uuid(), '{ann}', sha256('own'), now() + interval '1 day',
+              now() - interval '1 minute'),
+             (gen_random_uuid(), '{ann}', sha256('minted'), now() + interval '1 day',
+              now() - interval '10 seconds');
+         INSERT INTO admin_audit (actor, action, target, at) VALUES
+             ('app:{old_app}', 'app.user.session', '{ann}',
+              now() - interval '10 seconds' + interval '3 milliseconds');"
+    ))
+    .execute(&mut conn)
+    .await
+    .unwrap();
+    let trust: bool = sqlx::query_scalar("SELECT trust_email FROM apps WHERE id = $1")
+        .bind(old_app)
+        .fetch_one(&mut conn)
+        .await
+        .unwrap();
+    assert!(trust, "0.2.0 apps trust email by default");
+
+    let m7 = migrations.iter().find(|m| m.version == 7).unwrap();
+    sqlx::raw_sql(&m7.sql).execute(&mut conn).await.unwrap();
+
+    let apps: Vec<(Uuid, bool)> = sqlx::query_as("SELECT id, allow_sessions FROM apps ORDER BY id")
+        .fetch_all(&mut conn)
+        .await
+        .unwrap();
+    assert!(apps.iter().all(|(_, allow)| !allow), "{apps:?}");
+    let tags: Vec<(Vec<u8>, Option<Uuid>)> =
+        sqlx::query_as("SELECT token_sha256, created_by_app FROM sessions ORDER BY created_at")
+            .fetch_all(&mut conn)
+            .await
+            .unwrap();
+    assert_eq!(tags.len(), 2);
+    assert_eq!(tags[0].1, None, "the person's own session");
+    assert_eq!(tags[1].1, Some(old_app), "the minted one");
+    // New rows: allow_sessions defaults to false; access tokens start untagged.
+    sqlx::query("INSERT INTO apps (id, name, key_sha256) VALUES ($1, 'New', sha256('c'))")
+        .bind(Uuid::now_v7())
+        .execute(&mut conn)
+        .await
+        .unwrap();
+    let allowed: i64 = sqlx::query_scalar("SELECT count(*) FROM apps WHERE allow_sessions")
+        .fetch_one(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(allowed, 0);
+    drop(conn);
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&st.db)
+        .await
+        .unwrap();
 }

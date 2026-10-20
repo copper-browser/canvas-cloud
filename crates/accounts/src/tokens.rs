@@ -1,5 +1,7 @@
 //! Personal access tokens: `GET/POST /v1/tokens`, `DELETE /v1/tokens/{id}`. Only a signed-in
-//! session manages them — a token cannot mint, list or revoke tokens.
+//! session manages them — a token cannot mint, list or revoke tokens. A token created with a
+//! session a linked app minted carries that app (`access_tokens.created_by_app`), so revoking
+//! or rotating the app revokes the token too.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -72,7 +74,7 @@ pub(crate) async fn create(
     user: AuthUser,
     JsonBody(req): JsonBody<CreateToken, 4096>,
 ) -> Result<(StatusCode, Json<Value>)> {
-    require_session(&user)?;
+    let session_id = user.session_id().ok_or_else(session_required)?;
     let raw_name = req.name.unwrap_or_default();
     if raw_name.trim().chars().count() > MAX_DISPLAY_NAME_CHARS {
         return Err(ApiError::bad_request(format!(
@@ -106,6 +108,17 @@ pub(crate) async fn create(
         .bind(user.user_id)
         .execute(&mut *tx)
         .await?;
+    // The app that minted this session (if one did) is copied onto the token. The share lock
+    // makes a concurrent `apps revoke` / `apps rotate` wait for this token and then revoke it,
+    // or — if it ran first — leaves the session gone and the request unauthorized.
+    let created_by_app: Option<Uuid> = sqlx::query_scalar::<_, Option<Uuid>>(
+        "SELECT created_by_app FROM sessions WHERE id = $1 AND user_id = $2 FOR SHARE",
+    )
+    .bind(session_id)
+    .bind(user.user_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or(ApiError::Unauthorized("unauthorized"))?;
     let live: i64 = sqlx::query_scalar(&format!(
         "SELECT count(*) FROM access_tokens WHERE user_id = $1 AND {LIVE}"
     ))
@@ -119,8 +132,15 @@ pub(crate) async fn create(
         }
         .into());
     }
-    let (id, token) =
-        identity::create_access_token(&mut *tx, user.user_id, &name, scope, expires_at).await?;
+    let (id, token) = identity::create_access_token_for(
+        &mut *tx,
+        user.user_id,
+        &name,
+        scope,
+        expires_at,
+        created_by_app,
+    )
+    .await?;
     let view: TokenView = sqlx::query_as(
         "SELECT id, name, scope, created_at, last_used_at, expires_at FROM access_tokens
          WHERE id = $1",

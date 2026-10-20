@@ -14,7 +14,9 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use base64::Engine as _;
 use canvas_cloud_core::config::Config;
-use canvas_cloud_core::identity::{create_app, create_session, insert_user, NewUser};
+use canvas_cloud_core::identity::{
+    create_app, create_app_with, create_session, insert_user, AppFlags, NewUser,
+};
 use canvas_cloud_core::ids;
 use canvas_cloud_core::state::{AppState, SharedState};
 use canvas_cloud_core::Mounts;
@@ -195,6 +197,24 @@ impl TestApp {
             .await
             .unwrap();
         App { id, key }
+    }
+
+    /// An app with exactly these flags (`allow_sessions` lets it sign its users in).
+    pub async fn app_with(&self, flags: AppFlags) -> App {
+        let (id, key) = create_app_with(self.db(), "apps tests", flags)
+            .await
+            .unwrap();
+        App { id, key }
+    }
+
+    /// A `trust_email` app an operator allowed to sign its users in (`allow_sessions`).
+    pub async fn signing_app(&self) -> App {
+        self.app_with(AppFlags {
+            allow_import: false,
+            trust_email: true,
+            allow_sessions: true,
+        })
+        .await
     }
 
     /// Provisions `subject` (fresh email) for `app`; the caller acting as them.

@@ -10,7 +10,6 @@ use std::process::ExitCode;
 use anyhow::{bail, Context as _};
 use canvas_cloud_core::config::{self, Config, ConfigSource, GenerateOptions, TlsMode};
 use clap::{Args, Parser, Subcommand};
-use uuid::Uuid;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -188,6 +187,8 @@ pub enum SettingsCommand {
     },
 }
 
+/// Apps are named by id or by name (case-insensitive; a name several apps share must be given
+/// as an id).
 #[derive(Subcommand, Debug)]
 pub enum AppsCommand {
     /// Register a linked app and print its key (cva_…) once.
@@ -200,22 +201,56 @@ pub enum AppsCommand {
         /// Do not link existing users by email when provisioning (409 email_taken instead).
         #[arg(long)]
         no_trust_email: bool,
+        /// May sign its users in to this server with full sessions (POST
+        /// /v1/apps/self/users/{subject}/sessions, e.g. for [[delegated_sign_in]]). Needs
+        /// trust_email. Off by default: the app key then can act as anyone it can link by email.
+        #[arg(long, conflicts_with = "no_trust_email")]
+        allow_sessions: bool,
     },
     /// List linked apps (never their keys).
     List,
-    /// Revoke an app's key (its users and their canvases stay).
-    Revoke { id: Uuid },
-    /// Replace an app's key and print the new one once (the old key stops working).
-    Rotate { id: Uuid },
-    /// Change an app's policy: `--allow-import true|false`, `--trust-email true|false`.
+    /// Show one app: its policy and the live sessions and access tokens it minted.
+    Show {
+        /// The app's id, or its name (case-insensitive).
+        #[arg(value_name = "ID|NAME")]
+        app: String,
+    },
+    /// Revoke an app's key and end what it minted: delete the sessions it signed its users in
+    /// with and revoke the access tokens created with them. Its users and their canvases stay.
+    Revoke {
+        /// The app's id, or its name (case-insensitive).
+        #[arg(value_name = "ID|NAME")]
+        app: String,
+    },
+    /// Replace an app's key and print the new one once (the old key stops working). Also ends
+    /// the sessions the app minted and the access tokens created with them, unless
+    /// --keep-sessions.
+    Rotate {
+        /// The app's id, or its name (case-insensitive).
+        #[arg(value_name = "ID|NAME")]
+        app: String,
+        /// Routine rotation: keep the sessions the app minted (and their tokens) signed in.
+        #[arg(long)]
+        keep_sessions: bool,
+    },
+    /// Change an app's policy: --allow-import, --trust-email, --allow-sessions (each
+    /// true|false).
+    #[command(alias = "update")]
     Set {
-        id: Uuid,
+        /// The app's id, or its name (case-insensitive).
+        #[arg(value_name = "ID|NAME")]
+        app: String,
         /// May create canvases with POST /v1/apps/self/import.
         #[arg(long, value_name = "true|false")]
         allow_import: Option<bool>,
         /// Link existing users by email when provisioning (false: 409 email_taken).
         #[arg(long, value_name = "true|false")]
         trust_email: Option<bool>,
+        /// May sign its users in with full sessions (POST
+        /// /v1/apps/self/users/{subject}/sessions; also needs trust_email). Turning it off stops
+        /// new sign-ins; `apps rotate` / `apps revoke` end the existing ones.
+        #[arg(long, value_name = "true|false")]
+        allow_sessions: Option<bool>,
     },
 }
 
@@ -398,6 +433,7 @@ fn gen_config(args: &GenConfigArgs, cli_config: Option<PathBuf>) -> anyhow::Resu
 mod tests {
     use super::*;
     use clap::CommandFactory as _;
+    use uuid::Uuid;
 
     #[test]
     fn cli_is_well_formed() {
@@ -445,6 +481,18 @@ mod tests {
         assert!(parse(&["admin", "settings", "set", "allow_signup", "true"]).is_ok());
         assert!(parse(&["admin", "settings", "set", "signup_domains", "a.com,b.com"]).is_ok());
         assert!(parse(&["admin", "settings", "set", "nope", "1"]).is_err());
+        assert!(parse(&["healthcheck", "--wait", "30"]).is_ok());
+        assert!(parse(&["gen-config", "--write", "-", "--tls-mode", "off"]).is_ok());
+        assert!(parse(&["gen-config", "--tls-mode", "plain"]).is_err());
+    }
+
+    #[test]
+    fn apps_commands_parse() {
+        let parse = |args: &[&str]| {
+            let mut v = vec!["canvas-cloud"];
+            v.extend_from_slice(args);
+            Cli::try_parse_from(v)
+        };
         let cli = parse(&[
             "apps",
             "create",
@@ -459,11 +507,50 @@ mod tests {
             Some(Command::Apps(AppsCommand::Create {
                 allow_import: true,
                 no_trust_email: true,
+                allow_sessions: false,
                 ..
             }))
         ));
-        assert!(parse(&["apps", "revoke", "not-a-uuid"]).is_err());
-        assert!(parse(&["apps", "rotate", "00000000-0000-0000-0000-000000000001"]).is_ok());
+        let cli = parse(&["apps", "create", "--name", "Portal", "--allow-sessions"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Apps(AppsCommand::Create {
+                allow_sessions: true,
+                no_trust_email: false,
+                ..
+            }))
+        ));
+        assert!(
+            parse(&[
+                "apps",
+                "create",
+                "--name",
+                "P",
+                "--allow-sessions",
+                "--no-trust-email"
+            ])
+            .is_err(),
+            "sessions need trust_email"
+        );
+        // Apps are named by id or name.
+        assert!(parse(&["apps", "revoke", "Newspapers"]).is_ok());
+        assert!(parse(&["apps", "show", "Newspapers"]).is_ok());
+        let cli = parse(&["apps", "rotate", "00000000-0000-0000-0000-000000000001"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Apps(AppsCommand::Rotate {
+                keep_sessions: false,
+                ..
+            }))
+        ));
+        let cli = parse(&["apps", "rotate", "Newspapers", "--keep-sessions"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Apps(AppsCommand::Rotate {
+                keep_sessions: true,
+                ..
+            }))
+        ));
         let cli = parse(&[
             "apps",
             "set",
@@ -477,6 +564,16 @@ mod tests {
             Some(Command::Apps(AppsCommand::Set {
                 allow_import: Some(false),
                 trust_email: None,
+                allow_sessions: None,
+                ..
+            }))
+        ));
+        let cli = parse(&["apps", "update", "Newspapers", "--allow-sessions", "true"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Apps(AppsCommand::Set {
+                allow_sessions: Some(true),
+                allow_import: None,
                 ..
             }))
         ));
@@ -487,9 +584,6 @@ mod tests {
             "--allow-import"
         ])
         .is_err());
-        assert!(parse(&["healthcheck", "--wait", "30"]).is_ok());
-        assert!(parse(&["gen-config", "--write", "-", "--tls-mode", "off"]).is_ok());
-        assert!(parse(&["gen-config", "--tls-mode", "plain"]).is_err());
     }
 
     #[test]

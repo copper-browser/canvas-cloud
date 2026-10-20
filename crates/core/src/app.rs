@@ -244,6 +244,10 @@ async fn info(state: SharedState, extras: Arc<InfoExtras>) -> Result<Json<Value>
         "app_sessions_per_minute".into(),
         state.cfg.limits.app_sessions_per_minute.into(),
     );
+    limits.insert(
+        "app_session_ttl_hours".into(),
+        state.cfg.limits.app_session_ttl_hours.into(),
+    );
     for (k, v) in &extras.limits {
         limits.insert(k.clone(), v.clone());
     }

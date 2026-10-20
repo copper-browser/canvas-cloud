@@ -165,8 +165,10 @@ SHA-256 is stored, and lookup is by digest. Full reference: [auth.md](auth.md).
 - **OIDC** (authorization code + PKCE) is a way to get a session: the callback finds or
   creates the user by verified email and redirects with `#token=cvs_…`.
 - **Delegated sign-in** is another: `[[delegated_sign_in]]` sends the browser to a site that
-  signs the person in, mints their session as a `trust_email` linked app
-  (`POST /v1/apps/self/users/{subject}/sessions`) and redirects with `#token=cvs_…`.
+  signs the person in, mints their session as a linked app with `allow_sessions` and
+  `trust_email` (`POST /v1/apps/self/users/{subject}/sessions`) and redirects with
+  `#token=cvs_…`. Minted sessions (and access tokens created with them) carry
+  `created_by_app`, so revoking or rotating the app ends them.
 - **Admins** are not a role in the API: administration is the `canvas-cloud` CLI on the host,
   which talks to the database directly and writes `admin_audit` rows.
 - Every request resolves to one `AuthUser {user_id, email, display_name, via}`; `via` says

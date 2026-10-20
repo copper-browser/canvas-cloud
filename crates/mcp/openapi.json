@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Canvas Cloud API",
-    "version": "0.2.0",
+    "version": "0.2.1",
     "summary": "Collaborative canvases: REST, live Yjs rooms, accounts, linked apps and agent seams.",
     "description": "Every route of a Canvas Cloud server. All `/v1` routes speak JSON; errors are always `{\"error\": \"<code>\", \"message\": \"…\"}` (409 conflicts may carry extra fields). Authenticate with `Authorization: Bearer <credential>`: a session token (`cvs_…`), a personal access token (`cvt_…`; read-scoped tokens may only GET/HEAD and never join a live room — `403 read_only_token`), or a linked-app key (`cva_…`) plus `X-Canvas-User: <subject>` to act as one of the app's users (without that header an app key is accepted only on `/v1/apps/self/*`). WebSocket upgrades and `text/event-stream` GETs may pass the credential as `?token=` instead. In canvas routes `{id}` is a canvas UUID or the literal `personal` (the caller's Personal canvas, created on first use). A canvas the caller is not a member of is indistinguishable from one that does not exist (`404`). Agents can also use the MCP endpoint (`POST /mcp`) and the plain-text guide at `/llms.txt`.",
     "license": { "name": "MIT", "identifier": "MIT" }
@@ -721,7 +721,7 @@
         "tags": ["apps"],
         "operationId": "createAppUserSession",
         "summary": "Sign one of your app's users in (mint a session)",
-        "description": "The app as itself (no `X-Canvas-User`, `400` with it) signs a provisioned user in: an ordinary `cvs_…` session, the same as password or OIDC sign-in gives (30 days after its last use). Requires the app's `trust_email` (`403 trust_email_required`); an unknown subject is `404 unknown_subject`, a disabled user `403 account_disabled`. At most `limits.app_sessions_per_minute` per app (`429`). The response is `Cache-Control: no-store`; hand the token to the person's browser (for delegated sign-in: `redirect_uri#token=…`) and do not keep it.",
+        "description": "The app as itself (no `X-Canvas-User`, `400` with it) signs a provisioned user in: a `cvs_…` session like password or OIDC sign-in gives (30 days after its last use), but at most `limits.app_session_ttl_hours` after the mint and tagged with the app, so revoking or rotating the app ends it (and the access tokens created with it). Requires the app's `allow_sessions`, an operator's opt-in that is off by default (`403 sessions_not_allowed`), and `trust_email` (`403 trust_email_required`); an unknown subject is `404 unknown_subject`, a disabled user `403 account_disabled`. At most `limits.app_sessions_per_minute` per app (`429`). The response is `Cache-Control: no-store`; hand the token to the person's browser (for delegated sign-in: `redirect_uri#token=…`) and do not keep it.",
         "security": [{ "appKey": [] }],
         "requestBody": { "required": false, "content": { "application/json": { "schema": { "type": "object", "description": "Empty (`{}`) or absent." } } } },
         "responses": {
@@ -985,7 +985,7 @@
             }
           },
           "features": { "type": "array", "items": { "type": "string" }, "description": "e.g. canvases, mentions, share_links, people, ops_v2 (checklist cards, timelines, live links and comment ops), accounts, access_tokens, events, oidc, apps, app_sessions, import, mcp." },
-          "limits": { "type": "object", "additionalProperties": true, "properties": { "auth_per_minute": { "type": "integer" }, "import_max_bytes": { "type": "integer" }, "import_max_line_bytes": { "type": "integer" }, "app_sessions_per_minute": { "type": "integer" } } }
+          "limits": { "type": "object", "additionalProperties": true, "properties": { "auth_per_minute": { "type": "integer" }, "import_max_bytes": { "type": "integer" }, "import_max_line_bytes": { "type": "integer" }, "app_sessions_per_minute": { "type": "integer" }, "app_session_ttl_hours": { "type": "integer", "description": "Hard lifetime of an app-minted session in hours; 0 = no cap." } } }
         }
       },
       "UserRef": {
@@ -1434,7 +1434,7 @@
         "type": "object",
         "required": ["app", "users", "canvases", "rooms"],
         "properties": {
-          "app": { "type": "object", "required": ["id", "name", "allow_import"], "properties": { "id": { "type": "string", "format": "uuid" }, "name": { "type": "string" }, "allow_import": { "type": "boolean" } } },
+          "app": { "type": "object", "required": ["id", "name", "allow_import"], "properties": { "id": { "type": "string", "format": "uuid" }, "name": { "type": "string" }, "allow_import": { "type": "boolean" }, "trust_email": { "type": "boolean" }, "allow_sessions": { "type": "boolean", "description": "May mint user sessions (with trust_email)." } } },
           "users": { "type": "integer" },
           "canvases": { "type": "integer" },
           "rooms": { "type": "object", "required": ["rooms", "peers"], "properties": { "rooms": { "type": "integer" }, "peers": { "type": "integer" } } }

@@ -158,9 +158,9 @@ pub async fn delete(
     Ok(Json(json!({ "ok": true, "id": id, "name": name })))
 }
 
-/// `GET /v1/apps/self/stats`: `{app:{id,name,allow_import,trust_email}, allow_import, users,
-/// canvases, rooms:{rooms,peers}}` — canvases owned by this app's users, and the rooms of
-/// those canvases currently open on this server. (`allow_import` is repeated at the top level
+/// `GET /v1/apps/self/stats`: `{app:{id,name,allow_import,trust_email,allow_sessions},
+/// allow_import, users, canvases, rooms:{rooms,peers}}` — canvases owned by this app's users,
+/// and the rooms of those canvases currently open on this server. (`allow_import` is repeated at the top level
 /// for clients that look for it there.)
 pub async fn stats(State(state): State<SharedState>, app: AppAuth) -> Result<Json<Value>> {
     let (users, canvases): (i64, i64) = sqlx::query_as(
@@ -195,6 +195,7 @@ pub async fn stats(State(state): State<SharedState>, app: AppAuth) -> Result<Jso
             "name": app.name,
             "allow_import": app.allow_import,
             "trust_email": app.trust_email,
+            "allow_sessions": app.allow_sessions,
         },
         "allow_import": app.allow_import,
         "users": users,

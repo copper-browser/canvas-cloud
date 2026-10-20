@@ -103,8 +103,9 @@ Matching is exact. These origins may also call `POST /mcp`
 | `import_max_bytes` | integer, 1 KiB – 16 GiB | `536870912` (512 MiB) | `CANVAS_CLOUD_LIMITS__IMPORT_MAX_BYTES` | largest `POST /v1/apps/self/import` body |
 | `import_max_line_bytes` | integer, 1 KiB – `import_max_bytes` | `33554432` (32 MiB) | `CANVAS_CLOUD_LIMITS__IMPORT_MAX_LINE_BYTES` | longest NDJSON line in an import |
 | `app_sessions_per_minute` | integer ≥ 1 | `60` | `CANVAS_CLOUD_LIMITS__APP_SESSIONS_PER_MINUTE` | sessions one linked app may mint per minute with `POST /v1/apps/self/users/{subject}/sessions` ([apps.md](apps.md#post-v1appsselfuserssubjectsessions--sign-a-user-in)) |
+| `app_session_ttl_hours` | integer, 0 – 87600 | `720` (30 days) | `CANVAS_CLOUD_LIMITS__APP_SESSION_TTL_HOURS` | hard lifetime of a session a linked app minted: it still ends 30 days after its last use, but never lives longer than this many hours after the mint, however much it is used. `0` = no cap (it slides like any session). Applies to sessions minted after the change |
 
-All four are reported in `GET /v1/info` → `limits`. The other limits (body sizes, WebSocket
+All five are reported in `GET /v1/info` → `limits`. The other limits (body sizes, WebSocket
 frames, ops per call, mentions) are fixed in code; see
 [canvas.md](canvas.md#limits).
 
@@ -127,7 +128,8 @@ an error. Setup and the sign-in rules: [auth.md](auth.md#oidc-sign-in).
 
 One table per site that signs people in for this server (a portal behind its own single
 sign-on, say); any number. File only. Unknown keys are an error. The site needs a linked-app
-key with `trust_email`; the protocol and what the site must check are in
+key whose app has `trust_email` and `allow_sessions` (`canvas-cloud apps set <app>
+--allow-sessions true`; off by default); the protocol and what the site must check are in
 [auth.md](auth.md#delegated-sign-in).
 
 | Key | Type | Default | Meaning |
@@ -157,8 +159,8 @@ immediately:
 | `allow_signup` | `false` | `canvas-cloud admin settings set allow_signup true\|false` |
 | `signup_domains` | none | `canvas-cloud admin settings set signup_domains a.com,b.com` (`""` clears) |
 
-Linked apps (`canvas-cloud apps …`) and their `allow_import` / `trust_email` flags are also in
-the database ([apps.md](apps.md)).
+Linked apps (`canvas-cloud apps …`) and their `allow_import` / `trust_email` /
+`allow_sessions` flags are also in the database ([apps.md](apps.md)).
 
 ## Minimal example
 
@@ -206,6 +208,7 @@ extra_url_schemes = []
 [limits]
 auth_per_minute = 10
 app_sessions_per_minute = 60
+app_session_ttl_hours = 720
 
 [[oidc]]
 id = "google"

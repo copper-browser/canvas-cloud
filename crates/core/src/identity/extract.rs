@@ -28,6 +28,18 @@ pub struct AppAuth {
     pub name: String,
     pub allow_import: bool,
     pub trust_email: bool,
+    /// May mint user sessions (with `trust_email`).
+    pub allow_sessions: bool,
+    /// SHA-256 of the key the request used (what `apps.key_sha256` holds).
+    key_sha256: [u8; 32],
+}
+
+impl AppAuth {
+    /// SHA-256 of the key this request authenticated with, to re-check under a row lock that
+    /// the key was not rotated meanwhile (`apps.key_sha256`).
+    pub fn key_digest(&self) -> &[u8; 32] {
+        &self.key_sha256
+    }
 }
 
 #[allow(clippy::cast_lossless)]
@@ -108,7 +120,8 @@ WITH s AS (
     WHERE s.token_sha256 = $1 AND s.expires_at > now()
 ), touch AS (
     UPDATE sessions
-    SET last_used_at = now(), expires_at = now() + make_interval(days => $2)
+    SET last_used_at = now(),
+        expires_at = LEAST(now() + make_interval(days => $2), max_expires_at)
     WHERE id IN (SELECT id FROM s WHERE NOT disabled)
       AND last_used_at < now() - make_interval(secs => $3)
 )
@@ -143,14 +156,14 @@ LEFT JOIN users u ON u.id = au.user_id";
 
 const APP_SQL: &str = "
 WITH a AS (
-    SELECT id, name, allow_import, trust_email
+    SELECT id, name, allow_import, trust_email, allow_sessions
     FROM apps WHERE key_sha256 = $1 AND revoked_at IS NULL
 ), touch AS (
     UPDATE apps SET last_used_at = now()
     WHERE id IN (SELECT id FROM a)
       AND (last_used_at IS NULL OR last_used_at < now() - make_interval(secs => $2))
 )
-SELECT id, name, allow_import, trust_email FROM a";
+SELECT id, name, allow_import, trust_email, allow_sessions FROM a";
 
 type UserRow = (Uuid, String, String, bool);
 /// `(app_id, user_id?, email?, display_name?, disabled?)` — the user half is NULL when the
@@ -311,18 +324,22 @@ impl FromRequestParts<SharedState> for AppAuth {
                 "X-Canvas-User is not accepted on /v1/apps/self routes",
             ));
         }
-        let row: Option<(Uuid, String, bool, bool)> = sqlx::query_as(APP_SQL)
-            .bind(&credential_digest(token)[..])
+        let key_sha256 = credential_digest(token);
+        let row: Option<(Uuid, String, bool, bool, bool)> = sqlx::query_as(APP_SQL)
+            .bind(&key_sha256[..])
             .bind(TOUCH_SECS)
             .fetch_optional(&state.db)
             .await?;
-        let (app_id, name, allow_import, trust_email) = row.ok_or_else(unauthorized)?;
+        let (app_id, name, allow_import, trust_email, allow_sessions) =
+            row.ok_or_else(unauthorized)?;
         tracing::Span::current().record("app_id", tracing::field::display(app_id));
         let app = Self {
             app_id,
             name,
             allow_import,
             trust_email,
+            allow_sessions,
+            key_sha256,
         };
         parts.extensions.insert(app.clone());
         Ok(app)
