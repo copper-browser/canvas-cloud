@@ -37,7 +37,7 @@ canvas invites; lookups are case-insensitive.
 
 | Prefix | What | Where it comes from | Can manage tokens / sign out |
 |---|---|---|---|
-| `cvs_` | session (expires 30 days after its last use) | signup, login, OIDC | yes |
+| `cvs_` | session (expires 30 days after its last use) | signup, login, OIDC, a `trust_email` linked app ([delegated sign-in](#delegated-sign-in)) | yes |
 | `cvt_` | personal access token, `read` or `write` | `POST /v1/tokens` | no |
 | `cva_` + `X-Canvas-User: <subject>` | a linked app acting for one of its users | `canvas-cloud apps create` | no |
 
@@ -180,8 +180,11 @@ redirect_uris = ["myapp://signed-in"] # extra places results may go (see below)
 ```
 
 Register **`{public_url}/v1/auth/oidc/{id}/callback`** as the redirect URI at the provider.
-`GET /v1/auth/oidc` (and `GET /v1/info` → `auth.oidc`) lists the providers as
-`{providers: [{id, name, start}]}` for sign-in buttons.
+`GET /v1/auth/oidc` lists the providers for sign-in buttons as
+`{providers: [{id, name, start, kind}]}`, and `GET /v1/info` → `auth.oidc` is the same list
+(an array): the `[[oidc]]` providers (`kind: "oidc"`) in config order, then the
+[delegated](#delegated-sign-in) ones (`kind: "delegated"`, plus `start_url`). `start` is
+always `/v1/auth/oidc/{id}/start` on this server, so a client treats every entry alike.
 
 ### Flow
 
@@ -249,11 +252,53 @@ discovered endpoint must be `https` (`http` only for `localhost`/`127.0.0.1`).
   `allow_signup` is true and `signup_domains` (when set) admits it. The "first password
   account" rule of password signup does not apply to OIDC.
 
+## Delegated sign-in
+
+Another site can be a sign-in provider: a portal that already knows who its people are
+(behind its own single sign-on, say) signs them in to this server. Configure one
+`[[delegated_sign_in]]` table per such site ([configuration.md](configuration.md#delegated_sign_in--sign-in-through-another-site)):
+
+```toml
+[[delegated_sign_in]]
+id = "portal"                                   # [a-z0-9_-], ≤ 32, not also an [[oidc]] id
+name = "Team portal"                            # button label (defaults to id)
+start_url = "https://portal.example.com/canvas-signin"   # https (http only for loopback)
+```
+
+The site also holds a [linked-app](apps.md) key whose app has `trust_email` (the default):
+it provisions the person (`PUT /v1/apps/self/users/{subject}`) and mints their session with
+[`POST /v1/apps/self/users/{subject}/sessions`](apps.md#post-v1appsselfuserssubjectsessions--sign-a-user-in).
+The server stores nothing about the provider and never calls it.
+
+For the browser it is **the same protocol as OIDC**; a client needs no special case:
+
+1. The client sends the browser to `GET /v1/auth/oidc/{id}/start?redirect_uri=<where>`
+   (the `start` of the listed provider). `redirect_uri` must be an `http(s)` URL with the
+   same origin as `public_url` and no fragment (`400 redirect_uri_not_allowed` otherwise).
+2. The server redirects (`302`, `Cache-Control: no-store`, no cookie) to the provider's
+   `start_url` with `redirect_uri=<where>` added to its query:
+   `https://portal.example.com/canvas-signin?redirect_uri=https%3A%2F%2Fcanvas.example.com%2Faccount`.
+3. The site signs the person in its own way, provisions them, mints the session and sends
+   the browser to **`<where>#token=cvs_…`** — or, when it cannot, to
+   **`<where>#error=<code>&error_description=<text>`**. The client reads the fragment exactly
+   as after OIDC.
+
+**The site must check `redirect_uri` itself** before it puts a token in it, because a
+browser can be sent to `start_url` directly with any value: accept only an `http(s)` URL
+whose origin (scheme, host and port) is this server's `public_url` origin — for example
+with `new URL(redirect_uri).origin === "https://canvas.example.com"` — with no fragment,
+no user name or password, and only then append `#token=…`. Anything else is an error page
+on the site, never a redirect. The token must not be logged or stored by the site; mint one
+per sign-in and keep the response (`Cache-Control: no-store`) out of caches.
+
+Error codes are the site's to choose; use the ones in the OIDC table above where they fit
+(`access_denied`, `account_disabled`, `server_error`, …) so clients can show them in words.
+
 ## The account page
 
 `GET /account` (and `/account/`) serves one self-contained page for the people of a
-standalone server: sign in or sign up (password, and a button per OIDC provider whose
-redirect is `{public_url}/account`), their canvases, access tokens (create, copy once,
+standalone server: sign in or sign up (password, and a button per OIDC or delegated
+provider whose redirect is `{public_url}/account`), their canvases, access tokens (create, copy once,
 revoke), a ready-to-paste MCP client config for `{public_url}/mcp`, links to `/llms.txt`
 and `/v1/openapi.json`, display name and password changes, and sign out. The session token
 lives in `sessionStorage` (this tab only). Every action is a call to the API above.
@@ -279,4 +324,6 @@ Otherwise the page shows each canvas id with the API and MCP hints.
 
 - `auth_rate_limited_total` (core) and `auth_email_rate_limited_total` — refused auth calls
   per IP / per email.
+- `app_sessions_created_total` and `app_sessions_rate_limited_total` — sessions linked apps
+  minted (delegated sign-in), and mints refused by the per-app limit.
 - `sse_subscribers{stream="user"}` — open `/v1/events` streams.

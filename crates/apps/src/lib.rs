@@ -1,12 +1,15 @@
-//! Linked apps: `/v1/apps/self/*` (provisioning, events, admin listing, import, digest).
+//! Linked apps: `/v1/apps/self/*` (provisioning, sessions, events, admin listing, import,
+//! digest).
 //! See CONTRACT §5.3 (and §6 for the import format), `docs/apps.md` and
 //! `docs/import-format.md`.
 //!
 //! Every route authenticates with the app's own key (`Authorization: Bearer cva_…` without
 //! `X-Canvas-User`, core's [`canvas_cloud_core::identity::AppAuth`]).
 
+use std::sync::Arc;
+
 use axum::routing::{get, post, put};
-use axum::Router;
+use axum::{Extension, Router};
 use canvas_cloud_core::state::SharedState;
 
 pub mod canvases;
@@ -15,13 +18,15 @@ pub mod digest;
 pub mod directory;
 pub mod events;
 pub mod import;
+pub mod sessions;
 pub mod users;
 
 /// Capabilities this crate adds to `GET /v1/info` `features`.
-pub const FEATURES: &[&str] = &["app_events", "app_import"];
+pub const FEATURES: &[&str] = &["app_events", "app_import", "app_sessions"];
 
 /// Routes under `/v1` (paths relative to `/v1`). Mounted by `canvas_cloud::app`.
 pub fn router() -> Router<SharedState> {
+    let limiter: sessions::SharedSessionLimiter = Arc::new(sessions::SessionLimiter::default());
     Router::new()
         .route("/apps/self/users", get(users::list))
         // A literal segment containing a colon (axum 0.8 only rejects segments that *start*
@@ -36,6 +41,10 @@ pub fn router() -> Router<SharedState> {
             "/apps/self/users/{subject}/disconnect",
             post(users::disconnect),
         )
+        .route(
+            "/apps/self/users/{subject}/sessions",
+            post(sessions::create),
+        )
         .route("/apps/self/events", get(events::stream))
         .route("/apps/self/canvases", get(canvases::list))
         .route(
@@ -45,4 +54,5 @@ pub fn router() -> Router<SharedState> {
         .route("/apps/self/canvases/{id}/digest", get(canvases::digest))
         .route("/apps/self/stats", get(canvases::stats))
         .route("/apps/self/import", post(import::import))
+        .layer(Extension(limiter))
 }

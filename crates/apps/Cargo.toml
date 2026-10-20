@@ -23,6 +23,7 @@ axum.workspace = true
 base64.workspace = true
 bytes.workspace = true
 futures.workspace = true
+governor.workspace = true
 hex.workspace = true
 metrics.workspace = true
 serde.workspace = true

@@ -538,7 +538,7 @@
         "tags": ["auth"],
         "operationId": "listOidcProviders",
         "summary": "Single sign-on providers",
-        "description": "Public; for login buttons.",
+        "description": "Public; for login buttons. The `[[oidc]]` providers (`kind: \"oidc\"`), then the `[[delegated_sign_in]]` ones (`kind: \"delegated\"`).",
         "security": [],
         "responses": {
           "200": { "description": "Providers.", "content": { "application/json": { "schema": { "type": "object", "required": ["providers"], "properties": { "providers": { "type": "array", "items": { "$ref": "#/components/schemas/OidcProvider" } } } } } } }
@@ -551,13 +551,13 @@
         "tags": ["auth"],
         "operationId": "startOidc",
         "summary": "Begin single sign-on (browser redirect)",
-        "description": "Public. Redirects to the identity provider (authorization code + PKCE + nonce). `redirect_uri` must be one of the provider's configured `redirect_uris` or same-origin with the server's `public_url`.",
+        "description": "Public. Redirects to the identity provider (authorization code + PKCE + nonce). `redirect_uri` must be one of the provider's configured `redirect_uris` or same-origin with the server's `public_url`. For a delegated provider: `redirect_uri` must be same-origin with `public_url`, and the redirect goes to its `start_url` with `redirect_uri` added; the delegate returns to `redirect_uri#token=cvs_…` (or `#error=…`).",
         "security": [],
         "parameters": [
           { "name": "redirect_uri", "in": "query", "required": true, "description": "Where to return with `#token=cvs_…`.", "schema": { "type": "string", "format": "uri" } }
         ],
         "responses": {
-          "302": { "description": "To the identity provider." },
+          "302": { "description": "To the identity provider (or the delegate's `start_url`)." },
           "400": { "$ref": "#/components/responses/BadRequest" },
           "404": { "$ref": "#/components/responses/NotFound" }
         }
@@ -712,6 +712,25 @@
           "200": { "description": "Disconnected.", "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } } },
           "401": { "$ref": "#/components/responses/Unauthorized" },
           "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/apps/self/users/{subject}/sessions": {
+      "parameters": [{ "$ref": "#/components/parameters/Subject" }],
+      "post": {
+        "tags": ["apps"],
+        "operationId": "createAppUserSession",
+        "summary": "Sign one of your app's users in (mint a session)",
+        "description": "The app as itself (no `X-Canvas-User`, `400` with it) signs a provisioned user in: an ordinary `cvs_…` session, the same as password or OIDC sign-in gives (30 days after its last use). Requires the app's `trust_email` (`403 trust_email_required`); an unknown subject is `404 unknown_subject`, a disabled user `403 account_disabled`. At most `limits.app_sessions_per_minute` per app (`429`). The response is `Cache-Control: no-store`; hand the token to the person's browser (for delegated sign-in: `redirect_uri#token=…`) and do not keep it.",
+        "security": [{ "appKey": [] }],
+        "requestBody": { "required": false, "content": { "application/json": { "schema": { "type": "object", "description": "Empty (`{}`) or absent." } } } },
+        "responses": {
+          "201": { "description": "The session.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AppSession" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
         }
       }
     },
@@ -966,7 +985,7 @@
             }
           },
           "features": { "type": "array", "items": { "type": "string" }, "description": "e.g. canvases, mentions, share_links, people, accounts, access_tokens, events, oidc, apps, import, mcp." },
-          "limits": { "type": "object", "additionalProperties": true, "properties": { "auth_per_minute": { "type": "integer" }, "import_max_bytes": { "type": "integer" }, "import_max_line_bytes": { "type": "integer" } } }
+          "limits": { "type": "object", "additionalProperties": true, "properties": { "auth_per_minute": { "type": "integer" }, "import_max_bytes": { "type": "integer" }, "import_max_line_bytes": { "type": "integer" }, "app_sessions_per_minute": { "type": "integer" } } }
         }
       },
       "UserRef": {
@@ -1274,8 +1293,23 @@
       "Me": { "type": "object", "required": ["user", "via"], "properties": { "user": { "$ref": "#/components/schemas/User" }, "via": { "$ref": "#/components/schemas/Via" } } },
       "OidcProvider": {
         "type": "object",
-        "required": ["id", "name", "start"],
-        "properties": { "id": { "type": "string" }, "name": { "type": "string" }, "start": { "type": "string", "description": "`/v1/auth/oidc/{id}/start`; add `?redirect_uri=`." } }
+        "required": ["id", "name", "start", "kind"],
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "start": { "type": "string", "description": "`/v1/auth/oidc/{id}/start` (for every kind); add `?redirect_uri=`." },
+          "kind": { "type": "string", "enum": ["oidc", "delegated"], "description": "`delegated`: another site signs people in (`[[delegated_sign_in]]`); the browser protocol is the same." },
+          "start_url": { "type": "string", "format": "uri", "description": "Delegated only: where `start` redirects." }
+        }
+      },
+      "AppSession": {
+        "type": "object",
+        "required": ["token", "user_id", "expires_at"],
+        "properties": {
+          "token": { "type": "string", "description": "`cvs_…`, shown once." },
+          "user_id": { "type": "string", "format": "uuid" },
+          "expires_at": { "$ref": "#/components/schemas/Timestamp" }
+        }
       },
       "TokenRequest": {
         "type": "object",

@@ -146,7 +146,7 @@ async fn providers_are_listed() {
     assert_eq!(s, StatusCode::OK);
     assert_eq!(
         v["providers"][0],
-        json!({ "id": "corp", "name": "Test corp", "start": "/v1/auth/oidc/corp/start" })
+        json!({ "id": "corp", "name": "Test corp", "start": "/v1/auth/oidc/corp/start", "kind": "oidc" })
     );
     assert_eq!(v["providers"].as_array().unwrap().len(), 3);
     let (_, info) = app.call(reqwest::Method::GET, "/v1/info", None, None).await;

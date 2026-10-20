@@ -62,6 +62,7 @@ pub async fn run(source: &ConfigSource) -> bool {
     check_tls(&mut r, &cfg);
     check_listener(&mut r, &cfg).await;
     check_web(&mut r, &cfg);
+    check_sign_in(&mut r, &cfg);
 
     match cfg.metrics_listen {
         Some(bind) if !bind.ip().is_loopback() => r.line(
@@ -89,6 +90,38 @@ pub async fn run(source: &ConfigSource) -> bool {
         }
     );
     !r.failed
+}
+
+/// The sign-in providers (already validated by the config load): one line each, so an
+/// operator sees what the sign-in buttons will be and where a delegated one sends people.
+fn check_sign_in(r: &mut Report, cfg: &Config) {
+    if cfg.oidc.is_empty() && cfg.delegated_sign_in.is_empty() {
+        r.line(
+            Level::Ok,
+            "sign-in",
+            "password only (no [[oidc]] or [[delegated_sign_in]])",
+        );
+        return;
+    }
+    for p in &cfg.oidc {
+        r.line(
+            Level::Ok,
+            "sign-in",
+            format!("oidc {} \"{}\" → {}", p.id, p.label(), p.issuer),
+        );
+    }
+    for d in &cfg.delegated_sign_in {
+        r.line(
+            Level::Ok,
+            "sign-in",
+            format!(
+                "delegated {} \"{}\" → {} (the delegate mints sessions with a trust_email app key)",
+                d.id,
+                d.label(),
+                d.start_url
+            ),
+        );
+    }
 }
 
 fn check_config_file_mode(r: &mut Report, source: &ConfigSource) {
