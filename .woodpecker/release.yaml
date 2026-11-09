@@ -1,0 +1,28 @@
+# Roadrunner release (Woodpecker + Dagger, https://cicd.apps.exowatt.com); port of
+# .github/workflows/release.yml. A pushed v* tag builds both Linux archives (glibc 2.28
+# baseline) in a rust container on the engine and publishes the GitHub
+# release with generated notes. Manual run with the variable RELEASE_TAG=vX.Y.Z: a dry run (builds the
+# checked-out commit, whose crate version must equal the tag; publishes nothing). Logic: ci/release.sh.
+# `$$` escapes `$` for Woodpecker.
+labels:
+  tier: "0"
+when:
+  - event: tag
+    ref: refs/tags/v*
+  - event: manual
+    evaluate: 'RELEASE_TAG != nil && RELEASE_TAG != ""'
+steps:
+  - name: build
+    image: bash
+    commands:
+      - bash ci/release.sh build "$${CI_COMMIT_TAG:-$$RELEASE_TAG}"
+  - name: publish
+    image: bash
+    when:
+      - event: tag
+        ref: refs/tags/v*
+    environment:
+      GH_TOKEN:
+        from_secret: github_release_token
+    commands:
+      - bash ci/release.sh publish "$${CI_COMMIT_TAG:-$$RELEASE_TAG}"

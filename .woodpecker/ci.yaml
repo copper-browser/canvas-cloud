@@ -1,0 +1,61 @@
+# Roadrunner CI (Woodpecker + Dagger, https://cicd.apps.exowatt.com); port of
+# .github/workflows/ci.yml. The three steps run in parallel. `$$` escapes `$` for Woodpecker.
+# Native PostgreSQL only: --pg-admin-url creates one isolated database (core tests); the test
+# script creates the other six suites' databases next to it with the same CREATEDB role
+# (names <that db>_<suite>, so ci-pg-reap's ci_* sweep covers them) and drops them on exit.
+# The x86_64 release build stands in for the old ubuntu-latest + ubuntu-24.04-arm matrix
+# (no arm64 agent; release.yaml still cross-builds aarch64).
+labels:
+  tier: "0"
+when:
+  - event: pull_request
+  - event: push
+    branch: main
+  - event: manual
+    evaluate: 'RELEASE_TAG == nil || RELEASE_TAG == ""'
+steps:
+  - name: lint
+    image: bash
+    commands:
+      - >-
+        ci-dagger v0.10.1 rust --src=. --repo=canvas-cloud --apt=shellcheck
+        --dep-cache=registry.dev.exowatt.com/cache --dep-cache-password=file:///etc/woodpecker/zot-ci-cache
+        --run='cargo fmt --all --check
+        && cargo clippy --workspace --all-targets --locked -j4 -- -D warnings
+        && shellcheck -s sh install.sh
+        && sh install.sh --print-unit | diff -u packaging/canvas-cloud.service -'
+
+  - name: test
+    image: bash
+    commands:
+      - >-
+        ci-dagger v0.10.1 rust --src=. --repo=canvas-cloud --apt=postgresql-client
+        --pg-admin-url=file:///etc/woodpecker/pg-ci-test-url
+        --database-env=DATABASE_URL,CANVAS_CLOUD_TEST_CORE_DATABASE_URL
+        --dep-cache=registry.dev.exowatt.com/cache --dep-cache-password=file:///etc/woodpecker/zot-ci-cache
+        --run='export PGCONNECT_TIMEOUT=10; suites="engine apps accounts accounts_fresh mcp bin";
+        dropdbs() { for s in $$suites; do dropdb -w --if-exists --force --maintenance-db="$$PGDATABASE" "$${PGDATABASE}_$$s" || true; done; };
+        trap dropdbs EXIT;
+        u=$$DATABASE_URL; b=$${u%%\?*}; q=$${u:$${#b}};
+        for s in $$suites; do createdb -w --maintenance-db="$$PGDATABASE" "$${PGDATABASE}_$$s";
+        export "CANVAS_CLOUD_TEST_$${s^^}_DATABASE_URL=$${b}_$$s$$q"; done;
+        export CANVAS_CLOUD_TEST_DATABASE_URL=$$CANVAS_CLOUD_TEST_BIN_DATABASE_URL;
+        cargo test --workspace --locked -j4 -- --test-threads=4;
+        cargo build --locked -j4 -q; bin=$$CARGO_TARGET_DIR/debug/canvas-cloud; cfg=/tmp/canvas-cloud.toml;
+        $$bin gen-config --write $$cfg --tls-mode off --listen 127.0.0.1:18480
+        --database-url "$$CANVAS_CLOUD_TEST_DATABASE_URL" --state-dir /tmp/state;
+        $$bin --config $$cfg migrate;
+        $$bin --config $$cfg serve --no-migrate & pid=$$!;
+        $$bin --config $$cfg healthcheck --wait 30;
+        curl -fsS http://127.0.0.1:18480/v1/info | grep -q "\"name\":\"canvas-cloud\"";
+        kill $$pid; wait $$pid || true'
+
+  - name: build
+    image: bash
+    commands:
+      - >-
+        ci-dagger v0.10.1 rust --src=. --repo=canvas-cloud
+        --dep-cache=registry.dev.exowatt.com/cache --dep-cache-password=file:///etc/woodpecker/zot-ci-cache
+        --run='cargo build --release --locked -j4 -p canvas-cloud
+        && file "$$CARGO_TARGET_DIR/release/canvas-cloud"
+        && "$$CARGO_TARGET_DIR/release/canvas-cloud" version'
