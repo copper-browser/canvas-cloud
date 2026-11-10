@@ -25,7 +25,7 @@ use crate::transport::{RpcError, INVALID_PARAMS};
 /// `initialize` `instructions`: how to use the tools, for the model.
 pub const INSTRUCTIONS: &str = "\
 Canvas Cloud hosts collaborative whiteboards (canvases) that people edit live in a canvas app.
-Start with list_canvases (or pass \"personal\" for the caller's own Personal canvas), then read_canvas to see its shapes, arrows, active agents and recent chat.
+Start with list_canvases (or pass \"personal\" for the caller's own Personal canvas), then read_canvas to see its shapes, arrows, active agents, assistants and recent chat.
 Draw and edit with apply_ops; pass as={\"name\":\"<your agent name>\"} so people see who is writing. Your edits appear instantly for everyone in the canvas.
 Shape ids returned by apply_ops and read_canvas are how later ops refer to shapes. Never clear a canvas unless asked (clear needs confirm=true).
 Share with invite (email) or create_share_link; list_mentions shows chat messages that @mention the caller.";
@@ -530,6 +530,7 @@ fn read_summary(read: &Value, size: usize, full: bool) -> Value {
         "shapes": listed,
         "shapes_listed": listed.len(),
         "agents": read["agents"],
+        "assistants": read["assistants"],
         "comments": read["comments"].as_array().map_or(0, Vec::len),
         "chat_messages": read["chat"].as_array().map_or(0, Vec::len),
         "hint": hint,
@@ -782,6 +783,16 @@ fn read_canvas_out() -> Value {
                 &["id", "anchor", "resolved", "messages"],
             )),
             "agents": array_of(ty("object")),
+            "assistants": array_of(out(
+                json!({
+                    "id": ty("string"),
+                    "name": ty("string"),
+                    "chat": ty("string"),
+                    "avatar": ty("string"),
+                    "about": ty("string"),
+                }),
+                &["id", "name", "chat"],
+            )),
             "selection": array_of(ty("string")),
             "count": ty("integer"),
             "chat": array_of(ty("object")),
@@ -990,10 +1001,11 @@ Ops:
 - {"op":"connect","from":"goal","to":"risk","label":"blocked by"} — adds an arrow between two shapes (optional color, fromSide, toSide, id)
 - {"op":"clear"} — deletes every shape; refused unless confirm is true. Never clear unless the user explicitly asked.
 - Comment threads on a shape, Figma-style: {"op":"comment","on":"goal","text":"Is this still the plan?"} starts one (ids[i] is the thread id; optional id); {"op":"reply","thread":"<thread id>","text":"…"} adds onto one (a resolved thread opens again); {"op":"resolve","thread":"<thread id>","resolved":true|false} resolves or reopens. They are attributed to you (or `as`).
+- {"op":"assistant","id":"bot:helper","name":"Helper","chat":"https://example.com/agents/helper","avatar":"https://example.com/helper.png","about":"Ask me about this board"} — puts an assistant on the canvas: an agent people can chat with, shown with its name, picture and a Chat button that opens `chat` (an http(s) URL). It stays until removed, and the same id replaces the whole entry. name is 1-60 chars; avatar (http(s) image URL) and about (one line, ≤ 140 chars) are optional; at most 8 per canvas. {"op":"assistant","id":"bot:helper","remove":true} removes it. ids[i] is the assistant id. Needs "assistants" in /v1/info `features`.
 Ids may be written "shape:<id>". Later ops in the same call can use ids given to shapes added earlier in it. Aliases: text (or label) on a frame, link or checklist is its title; text/title on an arrow is its label; title on a sticky/text is its text. Unknown props for a type are an error.
 
 Envelope: `as` ({"name":"Planner","color":"purple"}) attributes the edit to your agent: created shapes get by = name and your cursor shows as writing on the canvas (default: the signed-in user). `near` ({x,y}) is where auto-placement looks for free space (default 0,0). `confirm`: true unlocks clear.
-Result: {applied, ids: [shape or thread id, or null, for each op], errors: [{index, op, error}]}. If nothing applied, the call is reported as an error. Checklist cards, timelines, live links and comment ops need a server whose /v1/info `features` include "ops_v2"."####;
+Result: {applied, ids: [shape, thread or assistant id, or null, for each op], errors: [{index, op, error}]}. If nothing applied, the call is reported as an error. Checklist cards, timelines, live links and comment ops need a server whose /v1/info `features` include "ops_v2"."####;
 
 static TOOLS: &[Tool] = &[
     Tool {
@@ -1039,7 +1051,7 @@ static TOOLS: &[Tool] = &[
     Tool {
         name: "read_canvas",
         title: "Read a canvas",
-        description: "Read a canvas: `canvas` {id, name, kind}; `shapes` sorted top-to-bottom then left-to-right, each with id, type, x, y, w, h, color, z, by (who made it) and per type: text (sticky/text), title (frame/link/checklist), label/from/to (arrow), url and live? (link; live: shown as a live web frame), src/naturalW/naturalH (image), and `frame` (the frame it sits in). A checklist card (a sticky with view:\"checklist\", or an older checklist shape) also has title, columns, rows:[{label, pick, by?, at?, note?, noteBy?, noteAt?, assignees?:[{name, id?, email?}]}] (note: the row's comment; an older checklist's rows also have id) and tally {column: count}; a timeline (view:\"timeline\") has title, start, end, step and items:[{date, end?, label, text?, color?, kind: note|bubble|section}]. `comments`: the comment threads people left on shapes, [{id, anchor (shape id), anchorDeleted?, resolved, resolvedBy?, messages:[{id, by, at, text, edited?}]}] (with ids/types, only those on the shapes returned). `agents` currently drawing; `count` (all shapes); `chat` (the last 50 messages, oldest first). Text is cut to 500 characters unless full=true. Narrow big canvases with `ids` or `types` (types match the stored type or the kind: checklist, timeline, web); a read over 200 KB returns a summary (counts, frames, shape ids) with `truncated: true` instead.",
+        description: "Read a canvas: `canvas` {id, name, kind}; `shapes` sorted top-to-bottom then left-to-right, each with id, type, x, y, w, h, color, z, by (who made it) and per type: text (sticky/text), title (frame/link/checklist), label/from/to (arrow), url and live? (link; live: shown as a live web frame), src/naturalW/naturalH (image), and `frame` (the frame it sits in). A checklist card (a sticky with view:\"checklist\", or an older checklist shape) also has title, columns, rows:[{label, pick, by?, at?, note?, noteBy?, noteAt?, assignees?:[{name, id?, email?}]}] (note: the row's comment; an older checklist's rows also have id) and tally {column: count}; a timeline (view:\"timeline\") has title, start, end, step and items:[{date, end?, label, text?, color?, kind: note|bubble|section}]. `comments`: the comment threads people left on shapes, [{id, anchor (shape id), anchorDeleted?, resolved, resolvedBy?, messages:[{id, by, at, text, edited?}]}] (with ids/types, only those on the shapes returned). `agents` currently drawing; `assistants`: the agents that live on this canvas and can be chatted with, [{id, name, chat (the URL where a chat with it opens), avatar?, about?}], oldest first; `count` (all shapes); `chat` (the last 50 messages, oldest first). Text is cut to 500 characters unless full=true. Narrow big canvases with `ids` or `types` (types match the stored type or the kind: checklist, timeline, web); a read over 200 KB returns a summary (counts, frames, shape ids) with `truncated: true` instead.",
         read_only: true,
         destructive: false,
         idempotent: true,

@@ -87,6 +87,7 @@ One `Y.Doc` per canvas:
 | `meta` | `Y.Map` | `name`, `createdBy` (user id) |
 | `comments` | `Y.Map<threadId, Y.Map>` | comment threads on shapes (0.2.0, written by the `comment`/`reply`/`resolve` ops and by clients) — see [Comments](#comments) |
 | `chat` | `Y.Array<object>` | shared-canvas chat, written only by clients (never the server): plain objects `{id, authorId, authorName, text (≤ 4000), mentions: [userId], at (ms epoch), editedAt?, deleted?}`, oldest first; the client caps it (about 1000, dropping the oldest). The server persists and relays it like any other root and shows the tail in [read](#read) |
+| `assistants` | `Y.Map<assistantId, object>` | agents that live on the canvas and that people can chat with (0.3.0), written by the `assistant` op and by clients: plain objects, replaced whole — see [Assistants](#assistants) |
 
 Shape props (all shapes): `id`, `type`, `x`, `y`, `w`, `h` (integers when written by the page
 or server), `color`, `by` (display name of the creator), `createdAt`, `updatedAt` (ms epoch),
@@ -171,6 +172,24 @@ but updates one in place — `notes` and `assignees` included — so older clien
 by, byId, at, editedAt?, deleted?}`. Threads whose shape was deleted stay (read reports
 `anchorDeleted`).
 
+<a id="assistants"></a>**Assistants (0.3.0).** `assistants` maps an assistant id (1–64 of
+`A–Z a–z 0–9 _ - : .`, like a shape id, e.g. `bot:helper`) to a plain object, replaced whole:
+
+```js
+{ "name": "Helper",                                  // 1–60 characters, trimmed
+  "chat": "https://example.com/agents/helper",       // http(s) URL, ≤ 2048: where a chat with it opens
+  "avatar": "https://example.com/helper.png",        // optional http(s) URL of a square image, ≤ 2048
+  "about": "Ask me about this board",                // optional, ≤ 140 characters, one line
+  "addedAt": 1794280000000 }                         // ms epoch, set by the writer
+```
+
+An assistant is not agent presence: an `agents` entry is a cursor that fades two minutes
+after its last write, an assistant stays until it is removed. A canvas holds at most 8. A
+client shows each one with its picture, its name and a button that opens `chat`. Readers
+skip an entry without a name or without an `http(s)` `chat`, drop an `avatar` that is not
+`http(s)`, never follow any other scheme (`javascript:` …), and order them by `addedAt`,
+then id.
+
 Readers are tolerant: a plain-string `text` is read like a `Y.Text`; missing sizes take the
 type default; unknown colours fall back to the default. Writers turn a plain-string body into
 a `Y.Text` on the next edit and splice text minimally so concurrent typing merges.
@@ -201,9 +220,19 @@ op is skipped and reported, the rest still apply.
 | `comment` | `{op:"comment", on, text, id?}` — starts a thread on a shape (`on` may be `shape:<id>`); `ids[i]` is the thread id. |
 | `reply` | `{op:"reply", thread, text}` — adds a message; a resolved thread opens again. `thread` may be `comment:<id>`. |
 | `resolve` | `{op:"resolve", thread, resolved?}` — resolves (default) or reopens. |
+| `assistant` | `{op:"assistant", id, name, chat, avatar?, about?}` — puts an [assistant](#assistants) on the canvas, or replaces the whole entry of one that is there (it keeps its `addedAt`). `{op:"assistant", id, remove:true}` removes it; removing one that is not there succeeds. `ids[i]` is the assistant id. (`features` has `"assistants"`.) |
 
 Comment ops are attributed to `as` (else the caller): `by` its name, `byId` its id. Text is
 trimmed, `\r\n` becomes `\n`, and it must be 1–10 000 characters.
+
+An `assistant` op is refused when `id` is missing or not 1–64 of `A–Z a–z 0–9 _ - : .`;
+`name` is missing, empty or over 60 characters once trimmed; `chat` is missing; `chat` or
+`avatar` is not a string that parses as an `http:` or `https:` URL (no scheme is added to a
+bare host), or is over 2048 characters once normalised; `about` is not a string or is over
+140 characters (runs of whitespace, line breaks included, become one space first; an empty
+one is left out); `remove` is not a boolean; or the `assistants` map already has 8 entries
+and `id` is not one of them. Omitted or `null` `avatar`/`about` are left out of the entry. A
+call may hold nothing but assistant ops; they do not move the `as` agent's cursor.
 
 **Rich shapes (`features` has `"ops_v2"`).**
 
@@ -255,7 +284,8 @@ shapes or to arrows, an arrow joining a shape to itself.
 }
 ```
 
-`ids[i]` is the id op `i` created or touched — `null` when it failed, and for `clear`.
+`ids[i]` is the id op `i` created or touched (a shape, a comment thread or an assistant) —
+`null` when it failed, and for `clear`.
 Request-level problems use `index: -1` (`"at most 500 ops per call (got 600)"`).
 
 ### Example
@@ -294,6 +324,10 @@ return the same shape (the server has no viewport or selection, so `viewport` is
     { "id": "agent:planner", "name": "Planner", "color": "hsl(212 62% 48%)",
       "cursor": { "x": 162, "y": 0 }, "status": "idle", "updatedAt": 1790000000000 }
   ],
+  "assistants": [
+    { "id": "bot:helper", "name": "Helper", "chat": "https://example.com/agents/helper",
+      "avatar": "https://example.com/helper.png", "about": "Ask me about this board" }
+  ],
   "selection": [],
   "count": 4,
   "chat": [
@@ -324,6 +358,10 @@ return the same shape (the server has no viewport or selection, so `viewport` is
   ≤ 4 KiB).
 - `frame` is the innermost frame wholly containing the shape.
 - `agents`: entries written within the last 2 minutes, busiest first, then by name.
+- `assistants`: `[{id, name, chat, avatar?, about?}]` by `addedAt`, then id — the
+  [assistants](#assistants) a reader can use (a name and an `http(s)` `chat`; `avatar` only
+  when `http(s)`; URLs normalised; `name` and `about` on one line, cut to 60 and 140
+  characters). `[]` when the canvas has none. `ids` / `types` do not filter it.
 - `count` is every readable shape, before `ids`/`types` filtering.
 - `chat` (server read only): the last 50 messages of the `chat` array, oldest first, in array
   order. Deleted messages (`deleted: true`) and entries without a string `id` are left out;

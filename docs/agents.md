@@ -148,13 +148,14 @@ display_name}, member_count, created_at, updated_at}` — exactly `GET /v1/canva
 
 * **`whoami`** — `via` is `{"kind":"session"}`, `{"kind":"token","scope":"read"|"write"}` or
   `{"kind":"app","app_id","subject"}`.
-* **`read_canvas`** — `{canvas: {id, name, kind}, shapes, comments, agents, selection, count,
-  chat}` as in [canvas-protocol.md](canvas-protocol.md#read): shapes sorted top-to-bottom then
+* **`read_canvas`** — `{canvas: {id, name, kind}, shapes, comments, agents, assistants,
+  selection, count, chat}` as in [canvas-protocol.md](canvas-protocol.md#read): shapes sorted top-to-bottom then
   left-to-right, text cut to 500 characters unless `full`, `count` = every shape, `chat` = the
   last 50 messages. Checklist cards (`view: "checklist"`: title, columns, rows with picks,
   comments and assignees, tally), timelines (`view: "timeline"`: start, end, step, items) and
   live links (`live: true`) read like Copper's `canvas_read`; `comments` lists the comment
-  threads on shapes; `types` also matches `checklist`, `timeline` and `web`. When the pretty-printed result would be over **200 KB** it returns a
+  threads on shapes; `assistants` lists the agents that live on the canvas and where to chat
+  with them (0.3.0); `types` also matches `checklist`, `timeline` and `web`. When the pretty-printed result would be over **200 KB** it returns a
   summary instead, still `isError: false`:
 
   ```json
@@ -162,16 +163,18 @@ display_name}, member_count, created_at, updated_at}` — exactly `GET /v1/canva
     "count": 17, "matched": 17, "by_type": {"sticky": 16, "frame": 1},
     "frames": [{"id": "f", "type": "frame", "x": -2000, "y": -2000, "w": 480, "h": 320, "label": "Area"}],
     "shapes": [{"id", "type", "view"?, "live"?, "x", "y", "w", "h", "frame"?, "label"?}, …],
-    "shapes_listed": 17, "agents": [], "comments": 0, "chat_messages": 0,
+    "shapes_listed": 17, "agents": [], "assistants": [], "comments": 0, "chat_messages": 0,
     "hint": "… Call read_canvas again with `ids` … or `types` …" }
   ```
 
   (at most 400 shapes and 100 frames listed, labels cut to 60 characters).
 * **`apply_ops`** — the `POST /v1/canvases/{id}/ops` envelope; the tool description carries the
   full ops cheat-sheet (shape types and props — checklist cards with notes and assignees,
-  timelines, live web frames — every op including `comment`/`reply`/`resolve`, ids and
-  `shape:<id>` refs, `as`, `near`, `confirm`). The rich shapes and comment ops need `features`
-  to include `ops_v2` (0.2.0+). A bad op is skipped and reported in `errors` while the rest apply
+  timelines, live web frames — every op including `comment`/`reply`/`resolve` and
+  `assistant`, ids and `shape:<id>` refs, `as`, `near`, `confirm`). The rich shapes and
+  comment ops need `features` to include `ops_v2` (0.2.0+); the `assistant` op (puts an agent
+  people can chat with on the canvas, until removed) needs `assistants` (0.3.0+). A bad op is
+  skipped and reported in `errors` while the rest apply
   (`isError: false`); when **nothing** applied (e.g. a lone `clear` without `confirm`) the
   call is `isError: true` with the `{applied: 0, ids, errors}` body. A malformed envelope is
   `isError` `bad_request` (after the membership check, so strangers get `not_found`).

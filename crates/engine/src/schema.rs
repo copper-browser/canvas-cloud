@@ -6,6 +6,8 @@
 //! * `agents`: `Y.Map<agentId, {name, color, cursor:{x,y}|null, status, updatedAt}>` (plain
 //!   JSON object values).
 //! * `meta`: `Y.Map` with `name` and `createdBy`.
+//! * `assistants`: `Y.Map<assistantId, {name, chat, avatar?, about?, addedAt}>` (plain JSON
+//!   object values): agents that live on the canvas and can be chatted with, until removed.
 //! * `comments`: optional, untouched by the server.
 
 use serde_json::Value;
@@ -18,6 +20,8 @@ pub const SHAPES: &str = "shapes";
 pub const AGENTS: &str = "agents";
 /// Root map holding canvas metadata.
 pub const META: &str = "meta";
+/// Root map holding the canvas's assistants (agents people can chat with).
+pub const ASSISTANTS: &str = "assistants";
 
 /// Every shape type the schema knows.
 pub const SHAPE_TYPES: [&str; 7] = [

@@ -12,6 +12,7 @@
 //! {op:"comment", on:shapeId, text, id?}                      // ids[i]: the new thread's id
 //! {op:"reply", thread, text}                                 // reopens a resolved thread
 //! {op:"resolve", thread, resolved?}                          // resolved defaults to true
+//! {op:"assistant", id, name, chat, avatar?, about?}          // upsert; `remove:true` deletes
 //! ```
 //!
 //! Rich shapes (`ops_v2`):
@@ -34,9 +35,12 @@ use serde::Serialize;
 use serde_json::{json, Map as JsonMap, Value};
 use yrs::{Any, GetString, Map, MapPrelim, MapRef, Out, Text, TextPrelim, TextRef, TransactionMut};
 
+mod assistant_ops;
 mod comment_ops;
 mod note_ops;
 mod timeline_ops;
+
+pub use assistant_ops::{MAX_ASSISTANTS, MAX_ASSISTANT_ABOUT, MAX_ASSISTANT_NAME};
 
 use crate::checklist::{clean_columns, clean_rows, LegacyPlan, Person, Picker, Row};
 use crate::geometry::{center, contains_box, find_free_spot, js_round, BoxF, Point, Side};
@@ -102,6 +106,10 @@ pub enum Op {
     },
     /// `{op:"resolve", thread, resolved?}`.
     Resolve {
+        op: JsonMap<String, Value>,
+    },
+    /// `{op:"assistant", id, name, chat, avatar?, about?}` or `{op:"assistant", id, remove:true}`.
+    Assistant {
         op: JsonMap<String, Value>,
     },
 }
@@ -183,8 +191,9 @@ impl Op {
             Some("comment") => Ok(Op::Comment { op: o.clone() }),
             Some("reply") => Ok(Op::Reply { op: o.clone() }),
             Some("resolve") => Ok(Op::Resolve { op: o.clone() }),
+            Some("assistant") => Ok(Op::Assistant { op: o.clone() }),
             _ => Err(format!(
-                "unknown op {} (add, update, move, resize, delete, connect, clear, comment, reply, resolve)",
+                "unknown op {} (add, update, move, resize, delete, connect, clear, comment, reply, resolve, assistant)",
                 o.get("op").unwrap_or(&Value::Null)
             )),
         }
@@ -203,6 +212,7 @@ impl Op {
             Op::Comment { .. } => "comment",
             Op::Reply { .. } => "reply",
             Op::Resolve { .. } => "resolve",
+            Op::Assistant { .. } => "assistant",
         }
     }
 }
@@ -387,6 +397,8 @@ fn apply_one(txn: &mut TransactionMut, shapes: &MapRef, op: &Op, ctx: &OpsCtx) -
                 .map(|t| anchor_of(txn, shapes, &t.anchor, ctx));
             Ok((Some(id), at))
         }
+        // Not on the board: the agent's cursor stays where it was.
+        Op::Assistant { op } => Ok((Some(assistant_ops::op_assistant(txn, op, ctx)?), None)),
     }
 }
 
@@ -474,6 +486,14 @@ pub fn valid_url(v: &Value, extra_schemes: &[String]) -> Result<String, String> 
         return Err(format!("unsupported link scheme {}:", parsed.scheme()));
     }
     Ok(parsed.to_string())
+}
+
+/// `s` as a normalised `http(s)` URL; `None` for anything else (`javascript:`, a bare host).
+pub fn http_url(s: &str) -> Option<String> {
+    url::Url::parse(crate::jsstr::js_trim(s))
+        .ok()
+        .filter(|u| matches!(u.scheme(), "http" | "https"))
+        .map(String::from)
 }
 
 /// Where a URL points, for a default link title.

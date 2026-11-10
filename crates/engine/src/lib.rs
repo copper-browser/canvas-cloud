@@ -75,7 +75,14 @@ pub mod api {
 }
 
 /// Capabilities this crate adds to `GET /v1/info` `features`.
-pub const FEATURES: &[&str] = &["canvases", "mentions", "share_links", "people", "ops_v2"];
+pub const FEATURES: &[&str] = &[
+    "canvases",
+    "mentions",
+    "share_links",
+    "people",
+    "ops_v2",
+    "assistants",
+];
 pub use admin::{canvases_deleted, disconnect_user, owned_canvases};
 pub use room::{
     close_all_rooms, evict_room_now, open_rooms, room_in_memory, rooms_metrics, RoomsMetrics,

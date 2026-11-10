@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Canvas Cloud API",
-    "version": "0.2.1",
+    "version": "0.3.0",
     "summary": "Collaborative canvases: REST, live Yjs rooms, accounts, linked apps and agent seams.",
     "description": "Every route of a Canvas Cloud server. All `/v1` routes speak JSON; errors are always `{\"error\": \"<code>\", \"message\": \"…\"}` (409 conflicts may carry extra fields). Authenticate with `Authorization: Bearer <credential>`: a session token (`cvs_…`), a personal access token (`cvt_…`; read-scoped tokens may only GET/HEAD and never join a live room — `403 read_only_token`), or a linked-app key (`cva_…`) plus `X-Canvas-User: <subject>` to act as one of the app's users (without that header an app key is accepted only on `/v1/apps/self/*`). WebSocket upgrades and `text/event-stream` GETs may pass the credential as `?token=` instead. In canvas routes `{id}` is a canvas UUID or the literal `personal` (the caller's Personal canvas, created on first use). A canvas the caller is not a member of is indistinguishable from one that does not exist (`404`). Agents can also use the MCP endpoint (`POST /mcp`) and the plain-text guide at `/llms.txt`.",
     "license": { "name": "MIT", "identifier": "MIT" }
@@ -347,7 +347,7 @@
         "tags": ["documents"],
         "operationId": "readCanvas",
         "summary": "The canvas in the agent read format",
-        "description": "Shapes sorted top-to-bottom then left-to-right, live agents, the shape count and the last 50 chat messages. Text, titles and labels are cut to 500 characters unless `full=true`.",
+        "description": "Shapes sorted top-to-bottom then left-to-right, live agents, the canvas's assistants, the shape count and the last 50 chat messages. Text, titles and labels are cut to 500 characters unless `full=true`.",
         "parameters": [
           { "name": "full", "in": "query", "required": false, "schema": { "type": "boolean", "default": false } },
           { "name": "ids", "in": "query", "required": false, "description": "Comma-separated shape ids.", "schema": { "type": "string" } },
@@ -984,7 +984,7 @@
               "app_url": { "type": ["string", "null"], "description": "Share-link web target (`{token}` substituted)." }
             }
           },
-          "features": { "type": "array", "items": { "type": "string" }, "description": "e.g. canvases, mentions, share_links, people, ops_v2 (checklist cards, timelines, live links and comment ops), accounts, access_tokens, events, oidc, apps, app_sessions, import, mcp." },
+          "features": { "type": "array", "items": { "type": "string" }, "description": "e.g. canvases, mentions, share_links, people, ops_v2 (checklist cards, timelines, live links and comment ops), assistants (the `assistant` op and `assistants` in read), accounts, access_tokens, events, oidc, apps, app_sessions, import, mcp." },
           "limits": { "type": "object", "additionalProperties": true, "properties": { "auth_per_minute": { "type": "integer" }, "import_max_bytes": { "type": "integer" }, "import_max_line_bytes": { "type": "integer" }, "app_sessions_per_minute": { "type": "integer" }, "app_session_ttl_hours": { "type": "integer", "description": "Hard lifetime of an app-minted session in hours; 0 = no cap." } } }
         }
       },
@@ -1137,6 +1137,17 @@
           "updatedAt": { "type": "number", "description": "ms since the epoch." }
         }
       },
+      "Assistant": {
+        "type": "object",
+        "required": ["id", "name", "chat"],
+        "description": "An agent that lives on the canvas and that people can chat with.",
+        "properties": {
+          "id": { "type": "string" }, "name": { "type": "string" },
+          "chat": { "type": "string", "format": "uri", "description": "http(s) URL where a chat with it opens." },
+          "avatar": { "type": "string", "format": "uri", "description": "http(s) URL of a square image." },
+          "about": { "type": "string", "description": "One line." }
+        }
+      },
       "ChatMessage": {
         "type": "object",
         "required": ["id", "authorId", "authorName", "text", "mentions", "at"],
@@ -1150,11 +1161,12 @@
       },
       "CanvasRead": {
         "type": "object",
-        "required": ["canvas", "shapes", "agents", "selection", "count", "chat"],
+        "required": ["canvas", "shapes", "agents", "assistants", "selection", "count", "chat"],
         "properties": {
           "canvas": { "type": "object", "required": ["id", "name", "kind"], "properties": { "id": { "type": "string" }, "name": { "type": "string" }, "kind": { "type": "string" } } },
           "shapes": { "type": "array", "items": { "$ref": "#/components/schemas/Shape" } },
           "agents": { "type": "array", "items": { "$ref": "#/components/schemas/Agent" }, "description": "Agents written to in the last 2 minutes." },
+          "assistants": { "type": "array", "items": { "$ref": "#/components/schemas/Assistant" }, "description": "By when they were added, then id." },
           "selection": { "type": "array", "items": { "type": "string" }, "description": "Always empty on the server." },
           "count": { "type": "integer", "description": "Every readable shape (before `ids`/`types`)." },
           "chat": { "type": "array", "items": { "$ref": "#/components/schemas/ChatMessage" }, "description": "The last 50 messages, oldest first." },
@@ -1223,7 +1235,9 @@
           { "type": "object", "required": ["op"], "properties": { "op": { "const": "clear" } }, "description": "Deletes every shape; refused unless the request has `confirm: true`." },
           { "type": "object", "required": ["op", "on", "text"], "properties": { "op": { "const": "comment" }, "on": { "type": "string" }, "text": { "type": "string", "maxLength": 10000 }, "id": { "type": "string" } }, "description": "Starts a comment thread on a shape; its id is the op's `ids` entry." },
           { "type": "object", "required": ["op", "thread", "text"], "properties": { "op": { "const": "reply" }, "thread": { "type": "string" }, "text": { "type": "string", "maxLength": 10000 } }, "description": "Adds onto a thread; a resolved thread opens again." },
-          { "type": "object", "required": ["op", "thread"], "properties": { "op": { "const": "resolve" }, "thread": { "type": "string" }, "resolved": { "type": "boolean", "default": true } } }
+          { "type": "object", "required": ["op", "thread"], "properties": { "op": { "const": "resolve" }, "thread": { "type": "string" }, "resolved": { "type": "boolean", "default": true } } },
+          { "type": "object", "required": ["op", "id", "name", "chat"], "properties": { "op": { "const": "assistant" }, "id": { "type": "string", "pattern": "^[A-Za-z0-9_\\-:.]{1,64}$" }, "name": { "type": "string", "minLength": 1, "maxLength": 60 }, "chat": { "type": "string", "format": "uri", "maxLength": 2048 }, "avatar": { "type": "string", "format": "uri", "maxLength": 2048 }, "about": { "type": "string", "maxLength": 140 } }, "description": "Puts an assistant on the canvas (at most 8), or replaces the one with this id. `chat` and `avatar` are http(s) URLs. Its id is the op's `ids` entry." },
+          { "type": "object", "required": ["op", "id", "remove"], "properties": { "op": { "const": "assistant" }, "id": { "type": "string" }, "remove": { "const": true } }, "description": "Removes an assistant; succeeds when there is none with this id." }
         ]
       },
       "OpsRequest": {
@@ -1247,7 +1261,7 @@
         "required": ["applied", "ids", "errors"],
         "properties": {
           "applied": { "type": "integer" },
-          "ids": { "type": "array", "items": { "type": ["string", "null"] }, "description": "Per op: the shape (or comment thread) id it created or touched; null when it failed, and for clear." },
+          "ids": { "type": "array", "items": { "type": ["string", "null"] }, "description": "Per op: the shape (or comment thread, or assistant) id it created or touched; null when it failed, and for clear." },
           "errors": { "type": "array", "items": { "type": "object", "required": ["index", "op", "error"], "properties": { "index": { "type": "integer", "description": "Op index; -1 for a problem with the whole request." }, "op": { "type": "string" }, "error": { "type": "string" } } } }
         }
       },

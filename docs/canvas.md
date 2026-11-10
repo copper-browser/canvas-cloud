@@ -191,7 +191,10 @@ vector is missing is returned. Apply with `Y.applyUpdate(doc, bytes)`.
 The agent-friendly read format (see [canvas-protocol.md](canvas-protocol.md#read)), identical
 to the canvas page's own read. Text is cut to 500 characters unless `full=true`. It also
 carries `chat`: the last 50 messages of the canvas chat, oldest first (see
-[Chat and mentions](#chat-and-mentions)); `ids` / `types` narrow the shapes, not the chat.
+[Chat and mentions](#chat-and-mentions)), and `assistants`: the agents that live on the
+canvas and can be chatted with (see
+[canvas-protocol.md](canvas-protocol.md#assistants)); `ids` / `types` narrow the shapes, not
+the chat or the assistants.
 
 ### `GET /people`
 
@@ -225,6 +228,7 @@ op `i`, `null` when it failed). Lets remote agents draw without a client.
 - `as` (optional): who is drawing. Shapes created get `by = as.name`; without `as`, `by` is
   your display name (or email). With `as`, the agent's entry in the `agents` map is set to
   `writing` with its cursor on the last thing touched, then back to `idle` 1.5 s later.
+  A call with only `assistant` ops marks it `writing` too and leaves its cursor where it was.
 - `near`: where auto-placement looks for free space (default `0,0`).
 - `confirm: true` is required for `{op:"clear"}` (or put `confirm: true` on the op).
 - At most 500 ops per call; the body may be a bare array of ops too. Envelope problems

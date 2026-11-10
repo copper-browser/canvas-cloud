@@ -5,6 +5,25 @@ before 1.0, breaking changes to the client contract (see
 [docs/v0.1.0.md](docs/v0.1.0.md#compatibility)) only come with a new minor version and are
 listed under **Breaking**.
 
+## 0.3.0
+
+Assistants: an agent can live on a canvas, so the people on it can open a chat with it.
+
+### Added
+
+- `GET /v1/info` → `features` gains `assistants`. With it:
+  - a new document root, `assistants`: a map of assistant id → `{name, chat, avatar?, about?,
+    addedAt}` (`chat`: the http(s) URL where a chat with it opens). Unlike `agents` presence,
+    an entry stays until it is removed; at most 8 per canvas.
+  - a new op, `{op:"assistant", id, name, chat, avatar?, about?}` (adds one, or replaces the
+    one with that id and keeps its `addedAt`) and `{op:"assistant", id, remove:true}`, on
+    `POST /v1/canvases/{id}/ops` and MCP `apply_ops`. `chat` and `avatar` must be `http(s)`
+    URLs; `ids[i]` is the assistant id.
+  - read (`GET /v1/canvases/{id}/read`, MCP `read_canvas`) carries
+    `assistants: [{id, name, chat, avatar?, about?}]`, oldest first (`[]` when none).
+- The server itself shows nothing: a canvas app draws the assistants (picture, name and a
+  Chat button). See [docs/canvas-protocol.md](docs/canvas-protocol.md#assistants).
+
 ## 0.2.1
 
 Security fix for app-minted sessions (0.2.0). Upgrade every 0.2.0 server. It is breaking for
