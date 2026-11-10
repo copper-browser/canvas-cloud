@@ -97,6 +97,7 @@ async fn lifecycle_over_http_with_a_personal_access_token() {
         "confirm",
         "near",
         "shape:<id>",
+        "\"op\":\"assistant\"",
     ] {
         assert!(d.contains(needle), "apply_ops description lacks {needle}");
     }
@@ -926,6 +927,22 @@ async fn rich_shapes_and_comments() {
         .collect();
     assert_eq!(ids, ["w", "t"]);
     assert_eq!(only["comments"], json!([]));
+
+    // 0.3.0: an assistant put on the canvas with nothing but an `assistant` op.
+    assert_eq!(read["assistants"], json!([]));
+    let r = mcp
+        .ok(
+            "apply_ops",
+            json!({ "canvas": "personal", "ops": [{ "op": "assistant", "id": "bot:helper",
+                "name": "Helper", "chat": "https://example.com/agents/helper" }] }),
+        )
+        .await;
+    assert_eq!(r["ids"], json!(["bot:helper"]), "{r}");
+    let read = mcp.ok("read_canvas", json!({ "canvas": "personal" })).await;
+    assert_eq!(
+        read["assistants"],
+        json!([{ "id": "bot:helper", "name": "Helper", "chat": "https://example.com/agents/helper" }])
+    );
 }
 
 #[tokio::test]

@@ -8,8 +8,12 @@ use yrs::{Doc, Map as _, ReadTxn, Transact as _};
 use crate::checklist::{note_row_summaries, row_summaries, ser_tally, tally, RowSummary};
 use crate::comments::{all_threads, summarize_thread, CommentSummary};
 use crate::geometry::{contains_box, js_round};
-use crate::ops::read_agent;
-use crate::schema::{jnum, js_len, js_slice, out_to_json, ser_num, ser_opt_num, ShapeType, AGENTS};
+use crate::jsstr::{collapse_space, js_trim};
+use crate::ops::{http_url, read_agent, MAX_ASSISTANT_ABOUT, MAX_ASSISTANT_NAME};
+use crate::schema::{
+    jnum, js_len, js_slice, json_f64, out_to_json, ser_num, ser_opt_num, ShapeType, AGENTS,
+    ASSISTANTS,
+};
 use crate::shape::{arrow_bbox, box_lookup, doc_shapes, Endpoint, Shape, View};
 use crate::timeline::{summarize_items, timeline_of};
 use crate::timeline_text::today_iso;
@@ -134,7 +138,20 @@ pub struct AgentSummary {
     pub updated_at: f64,
 }
 
-/// `{canvas, viewport?, shapes, agents, selection, count}`.
+/// One assistant: an agent that lives on the canvas, and where a chat with it opens.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AssistantSummary {
+    pub id: String,
+    pub name: String,
+    /// An `http(s)` URL.
+    pub chat: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub about: Option<String>,
+}
+
+/// `{canvas, viewport?, shapes, comments, agents, assistants, selection, count}`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ReadResult {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -146,6 +163,8 @@ pub struct ReadResult {
     /// Comment threads, oldest first; with `ids`/`types`, only those on the shapes returned.
     pub comments: Vec<CommentSummary>,
     pub agents: Vec<AgentSummary>,
+    /// The canvas's assistants, oldest first.
+    pub assistants: Vec<AssistantSummary>,
     /// The server has no selection; always empty.
     pub selection: Vec<String>,
     /// Every readable shape in the document (before `ids`/`types` filtering).
@@ -338,6 +357,35 @@ fn summarize(s: &Shape, all: &[Shape], frames: &[&Shape], full: bool, today: &st
     sum
 }
 
+/// The document's assistants by `addedAt`, then id. Readers are tolerant: an entry without
+/// a name or an `http(s)` `chat` is skipped, an `avatar` that is not `http(s)` is dropped.
+pub fn read_assistants<T: ReadTxn>(txn: &T) -> Vec<AssistantSummary> {
+    let Some(map) = txn.get_map(ASSISTANTS) else {
+        return Vec::new();
+    };
+    let text = |v: &Value, key: &str, max: usize| {
+        let s = collapse_space(v.get(key)?.as_str()?);
+        Some(js_slice(js_trim(&s), max).to_owned()).filter(|s| !s.is_empty())
+    };
+    let url = |v: &Value, key: &str| v.get(key)?.as_str().and_then(http_url);
+    let mut out: Vec<(f64, AssistantSummary)> = map
+        .iter(txn)
+        .filter_map(|(id, value)| {
+            let v = out_to_json(txn, &value);
+            let summary = AssistantSummary {
+                id: id.to_owned(),
+                name: text(&v, "name", MAX_ASSISTANT_NAME)?,
+                chat: url(&v, "chat")?,
+                avatar: url(&v, "avatar"),
+                about: text(&v, "about", MAX_ASSISTANT_ABOUT),
+            };
+            Some((v.get("addedAt").and_then(json_f64).unwrap_or(0.0), summary))
+        })
+        .collect();
+    out.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.id.cmp(&b.1.id)));
+    out.into_iter().map(|(_, a)| a).collect()
+}
+
 /// The board as an agent should see it, over an existing read transaction.
 #[allow(clippy::cast_precision_loss)]
 pub fn read_canvas_txn<T: ReadTxn>(txn: &T, opts: &ReadOpts) -> ReadResult {
@@ -407,6 +455,7 @@ pub fn read_canvas_txn<T: ReadTxn>(txn: &T, opts: &ReadOpts) -> ReadResult {
         shapes,
         comments,
         agents,
+        assistants: read_assistants(txn),
         selection: Vec::new(),
         count: all.len(),
     }

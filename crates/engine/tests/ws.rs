@@ -217,6 +217,85 @@ async fn compaction_after_200_updates() {
     assert_eq!(common::shape_count(&doc), n);
 }
 
+/// 0.3.0: an ops call with nothing but assistant ops (and `as`) applies, shows in `/read`
+/// and marks the agent present; the assistant survives snapshot compaction and a reload.
+#[tokio::test]
+async fn assistants_via_ops_survive_compaction_and_reload() {
+    let app = TestApp::new().await;
+    let a = app.user("host").await;
+    let id = app.canvas(&a, "Hosted").await;
+    let cid = canvas_uuid(&id);
+    let base = format!("/canvases/{id}");
+    let (_, read) = app.get(&a, &format!("{base}/read")).await;
+    assert_eq!(read["assistants"], json!([]));
+
+    let (s, r) = app
+        .post(
+            &a,
+            &format!("{base}/ops"),
+            json!({
+                "as": { "id": "agent:helper", "name": "Helper" },
+                "ops": [
+                    { "op": "assistant", "id": "bot:1", "name": "Helper",
+                      "chat": "https://example.com/agents/abc", "about": "Ask me" },
+                    { "op": "assistant", "id": "bot:2", "name": "Bad", "chat": "javascript:alert(1)" }
+                ]
+            }),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{r}");
+    assert_eq!(r["applied"], 1, "{r}");
+    assert_eq!(r["ids"], json!(["bot:1", null]));
+    assert_eq!(r["errors"][0]["index"], 1);
+    assert_eq!(r["errors"][0]["op"], "assistant");
+    let want = json!([{ "id": "bot:1", "name": "Helper",
+                        "chat": "https://example.com/agents/abc", "about": "Ask me" }]);
+    let (_, read) = app.get(&a, &format!("{base}/read")).await;
+    assert_eq!(read["assistants"], want, "{read}");
+    // The agent shows as present, with no cursor: it touched nothing on the board.
+    assert_eq!(read["agents"][0]["id"], "agent:helper", "{read}");
+    assert_eq!(read["agents"][0]["cursor"], Value::Null);
+
+    // Past the compaction threshold (200 updates), then a reload from the snapshot.
+    let mut p = app.peer(&a, &id).await;
+    let n: u32 = 230;
+    for i in 0..n {
+        let sid = format!("s{i}");
+        p.edit(|txn| add_sticky(txn, &sid, "x", f64::from(i))).await;
+    }
+    assert!(
+        eventually(Duration::from_secs(20), || async {
+            let (_, read) = app.get(&a, &format!("{base}/read")).await;
+            read["shapes"].as_array().map_or(0, Vec::len) == n as usize
+        })
+        .await,
+        "all updates applied"
+    );
+    p.close().await;
+    let snapshot: Option<i64> =
+        sqlx::query_scalar("SELECT seq FROM canvas_snapshots WHERE canvas_id = $1")
+            .bind(cid)
+            .fetch_optional(app.db())
+            .await
+            .unwrap();
+    assert!(snapshot.is_some(), "a snapshot exists after > 200 updates");
+    assert!(eventually(T, || async { canvas_cloud_engine::evict_room_now(cid) }).await);
+    let (_, read) = app.get(&a, &format!("{base}/read")).await;
+    assert_eq!(read["assistants"], want, "{read}");
+
+    // Removing it (again, an assistant-only call) empties the list.
+    let (_, r) = app
+        .post(
+            &a,
+            &format!("{base}/ops"),
+            json!([{ "op": "assistant", "id": "bot:1", "remove": true }]),
+        )
+        .await;
+    assert_eq!(r["applied"], 1, "{r}");
+    let (_, read) = app.get(&a, &format!("{base}/read")).await;
+    assert_eq!(read["assistants"], json!([]));
+}
+
 #[tokio::test]
 async fn ops_endpoint_reaches_ws_peers() {
     let app = TestApp::new().await;

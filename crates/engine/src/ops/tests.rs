@@ -959,3 +959,209 @@ fn legacy_checklist_rows_and_columns() {
     assert_eq!(r.errors[0].error, "`picks`: no row \"Zed\"");
     assert_eq!(shape(&doc, "c")["title"], "Old");
 }
+
+// ---- assistants -------------------------------------------------------------------------
+
+fn assistants(doc: &Doc) -> Value {
+    let map = doc.get_or_insert_map("assistants");
+    let txn = doc.transact();
+    out_to_json(&txn, &yrs::Out::YMap(map))
+}
+
+fn read_assistants(doc: &Doc) -> Value {
+    serde_json::to_value(crate::read::read_assistants(&doc.transact())).unwrap()
+}
+
+#[test]
+fn assistant_upsert_replace_and_remove() {
+    let doc = Doc::new();
+    let r = run(
+        &doc,
+        json!([{"op":"assistant","id":"bot:1","name":"  Helper ","chat":" https://example.com/agents/abc ",
+                "avatar":"https://example.com/a.png","about":" Ask me\n about today "}]),
+    );
+    assert_eq!((r.applied, r.errors.len()), (1, 0), "{r:?}");
+    assert_eq!(r.ids, vec![Some("bot:1".to_owned())]);
+    assert_eq!(r.anchor, None, "an assistant is not on the board");
+    assert_eq!(
+        assistants(&doc),
+        json!({"bot:1": {"name":"Helper","chat":"https://example.com/agents/abc",
+                         "avatar":"https://example.com/a.png","about":"Ask me about today","addedAt":1000}})
+    );
+
+    // An upsert replaces the whole entry and keeps the original `addedAt`.
+    let shapes = doc.get_or_insert_map("shapes");
+    let later = OpsCtx {
+        now_ms: 2_000,
+        ..ctx()
+    };
+    let r = apply_json_ops(
+        &mut doc.transact_mut(),
+        &shapes,
+        json!([{"op":"assistant","id":"bot:1","name":"Helper 2","chat":"http://example.com/c","avatar":null,"remove":false}])
+            .as_array()
+            .unwrap(),
+        &later,
+    );
+    assert_eq!(r.applied, 1, "{r:?}");
+    assert_eq!(
+        assistants(&doc),
+        json!({"bot:1": {"name":"Helper 2","chat":"http://example.com/c","addedAt":1000}})
+    );
+
+    // Next to a shape op, the cursor rests on the shape.
+    let r = run(
+        &doc,
+        json!([{"op":"add","shape":{"id":"s","type":"sticky","x":0,"y":0}},
+               {"op":"assistant","id":"bot:2","name":"Two","chat":"https://example.com/2"}]),
+    );
+    assert_eq!(r.applied, 2, "{r:?}");
+    assert!(r.anchor.is_some());
+
+    // Remove; removing one that is not there (even before the map exists) succeeds too.
+    let r = run(
+        &doc,
+        json!([{"op":"assistant","id":"bot:1","remove":true},
+               {"op":"assistant","id":"bot:1","remove":true}]),
+    );
+    assert_eq!((r.applied, r.errors.len()), (2, 0), "{r:?}");
+    assert_eq!(r.ids, vec![Some("bot:1".to_owned()); 2]);
+    assert_eq!(read_assistants(&doc)[0]["id"], "bot:2");
+    assert_eq!(read_assistants(&doc).as_array().unwrap().len(), 1);
+    let fresh = Doc::new();
+    let r = run(
+        &fresh,
+        json!([{"op":"assistant","id":"nope","remove":true}]),
+    );
+    assert_eq!(r.applied, 1, "{r:?}");
+}
+
+#[test]
+fn assistant_validation() {
+    let doc = Doc::new();
+    let ok = json!({"op":"assistant","id":"a","name":"A","chat":"https://example.com/"});
+    let with = |key: &str, v: Value| {
+        let mut op = ok.clone();
+        op[key] = v;
+        op
+    };
+    let without = |key: &str| {
+        let mut op = ok.clone();
+        op.as_object_mut().unwrap().remove(key);
+        op
+    };
+    let long_url = format!("https://example.com/{}", "x".repeat(2048));
+    let cases = [
+        (with("chat", json!("javascript:alert(1)")), "`chat` must be"),
+        (with("chat", json!("example.com/chat")), "`chat` must be"),
+        (with("chat", json!(long_url)), "`chat` must be"),
+        (with("chat", json!(7)), "`chat` must be"),
+        (without("chat"), "`assistant` needs `chat`"),
+        (
+            with("avatar", json!("data:image/png;base64,AAAA")),
+            "`avatar` must be",
+        ),
+        (without("name"), "`name` must be"),
+        (with("name", json!("   ")), "`name` must be"),
+        (with("name", json!("n".repeat(61))), "`name` must be"),
+        (with("about", json!("a".repeat(141))), "`about` must be"),
+        (with("about", json!(3)), "`about` must be"),
+        (without("id"), "`id` must be"),
+        (with("id", json!("no spaces")), "`id` must be"),
+        (with("id", json!("x".repeat(65))), "`id` must be"),
+        (with("remove", json!("yes")), "`remove` must be"),
+    ];
+    for (op, want) in cases {
+        let r = run(&doc, json!([op]));
+        assert_eq!((r.applied, r.ids.clone()), (0, vec![None]), "{op}");
+        assert_eq!(r.errors[0].op, "assistant");
+        assert!(r.errors[0].error.starts_with(want), "{op}: {r:?}");
+    }
+    assert_eq!(assistants(&doc), json!({}), "a refused op writes nothing");
+    // The longest name and `about` (UTF-16 units) are fine.
+    let r = run(
+        &doc,
+        json!([
+            with("name", json!("é".repeat(60))),
+            with("about", json!("a".repeat(140)))
+        ]),
+    );
+    assert_eq!(r.applied, 2, "{r:?}");
+}
+
+#[test]
+fn at_most_eight_assistants() {
+    let doc = Doc::new();
+    let add = |id: &str| json!({"op":"assistant","id":id,"name":id,"chat":"https://example.com/"});
+    let ids: Vec<String> = (0..9).map(|i| format!("bot{i}")).collect();
+    let r = run(&doc, Value::Array(ids.iter().map(|id| add(id)).collect()));
+    assert_eq!(r.applied, 8, "{r:?}");
+    assert_eq!(r.errors[0].index, 8);
+    assert!(
+        r.errors[0].error.starts_with("at most 8 assistants"),
+        "{r:?}"
+    );
+    // Replacing one is fine, and so is a new one once another is removed.
+    let r = run(
+        &doc,
+        json!([add("bot3"), {"op":"assistant","id":"bot0","remove":true}, add("bot8")]),
+    );
+    assert_eq!((r.applied, r.errors.len()), (3, 0), "{r:?}");
+    assert_eq!(read_assistants(&doc).as_array().unwrap().len(), 8);
+}
+
+#[test]
+fn assistants_read_in_order_and_skip_what_is_unusable() {
+    let doc = Doc::new();
+    assert_eq!(read_assistants(&doc), json!([]));
+    {
+        let map = doc.get_or_insert_map("assistants");
+        let mut txn = doc.transact_mut();
+        let entries = [
+            (
+                "late",
+                json!({"name":"Late","chat":"https://example.com/l","addedAt":30}),
+            ),
+            (
+                "b",
+                json!({"name":"B","chat":"https://example.com/b","addedAt":20}),
+            ),
+            (
+                "a",
+                json!({"name":" A ","chat":"https://example.com/a","addedAt":20,
+                       "avatar":"javascript:alert(1)","about":"two\nlines"}),
+            ),
+            (
+                "undated",
+                json!({"name":"Undated","chat":"http://example.com/u"}),
+            ),
+            (
+                "js",
+                json!({"name":"Js","chat":"javascript:alert(1)","addedAt":1}),
+            ),
+            (
+                "nameless",
+                json!({"name":"  ","chat":"https://example.com/","addedAt":2}),
+            ),
+            ("nochat", json!({"name":"No chat","addedAt":3})),
+            ("junk", json!("not an assistant")),
+        ];
+        for (id, v) in entries {
+            map.insert(&mut txn, id, crate::schema::json_to_any(&v));
+        }
+    }
+    assert_eq!(
+        read_assistants(&doc),
+        json!([
+            {"id":"undated","name":"Undated","chat":"http://example.com/u"},
+            {"id":"a","name":"A","chat":"https://example.com/a","about":"two lines"},
+            {"id":"b","name":"B","chat":"https://example.com/b"},
+            {"id":"late","name":"Late","chat":"https://example.com/l"},
+        ])
+    );
+    // The read format carries them (and `[]` when there are none).
+    let read = serde_json::to_value(crate::read::read_shapes(&doc, false)).unwrap();
+    assert_eq!(read["assistants"], read_assistants(&doc));
+    let empty = serde_json::to_value(crate::read::read_shapes(&Doc::new(), false)).unwrap();
+    assert_eq!(empty["assistants"], json!([]));
+}
